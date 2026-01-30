@@ -471,7 +471,7 @@ export interface FormField {
   element?: HTMLElement; // Not serialized, used for filling
 }
 
-// Detect if we're on an application form page
+// Detect if we're on a known application platform
 function detectApplicationPlatform(): ApplicationPlatformConfig | null {
   const hostname = window.location.hostname;
   const url = window.location.href;
@@ -490,6 +490,33 @@ function detectApplicationPlatform(): ApplicationPlatformConfig | null {
   }
 
   return null;
+}
+
+// Check if page has fillable form fields (generic detection)
+function hasFormFields(): boolean {
+  const inputs = document.querySelectorAll('input, select, textarea');
+  let fillableCount = 0;
+  
+  inputs.forEach((element) => {
+    const el = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+    const type = el.type?.toLowerCase() || '';
+    
+    // Skip non-fillable types
+    if (['hidden', 'submit', 'button', 'reset', 'image', 'file'].includes(type)) {
+      return;
+    }
+    
+    // Skip invisible elements
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return;
+    }
+    
+    fillableCount++;
+  });
+  
+  // Consider it a form page if there are at least 3 fillable fields
+  return fillableCount >= 3;
 }
 
 // Get the closest label for an input element
@@ -784,9 +811,10 @@ chrome.runtime.onMessage.addListener(
     
     if (request.action === 'checkApplicationPage') {
       const platform = detectApplicationPlatform();
+      const hasFields = hasFormFields();
       sendResponse({ 
-        isApplicationPage: platform !== null,
-        platform: platform?.name || null
+        isApplicationPage: platform !== null || hasFields,
+        platform: platform?.name || (hasFields ? 'Generic Form' : null)
       });
     }
 
