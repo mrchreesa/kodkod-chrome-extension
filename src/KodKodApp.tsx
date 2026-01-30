@@ -1,7 +1,7 @@
 
 import { useEffect, useState } from 'react';
-import { fetchProfiles, generateResume, fetchCredits, type Profile, type CreditData } from './lib/api';
-import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X } from 'lucide-react';
+import { fetchProfiles, generateResume, fetchCredits, fillForm, type Profile, type CreditData, type FormField } from './lib/api';
+import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X, ClipboardPen, CheckCircle2 } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Card } from './components/ui/Card';
 import { Textarea } from './components/ui/Textarea';
@@ -24,6 +24,13 @@ export default function KodKodApp() {
   const [coverLetterHtml, setCoverLetterHtml] = useState<string | null>(null);
   const [credits, setCredits] = useState<CreditData | null>(null);
   const { theme, setTheme } = useTheme();
+  
+  // Auto-fill state
+  const [isApplicationPage, setIsApplicationPage] = useState(false);
+  const [applicationPlatform, setApplicationPlatform] = useState<string | null>(null);
+  const [autoFilling, setAutoFilling] = useState(false);
+  const [autoFillResult, setAutoFillResult] = useState<{ filled: number; failed: number } | null>(null);
+  const [autoFillStep, setAutoFillStep] = useState<string>('');
   
   // Generation Options - Initialize from localStorage if available
   const [skipSummary, setSkipSummary] = useState(() => {
@@ -58,6 +65,7 @@ export default function KodKodApp() {
 
   useEffect(() => {
     checkAuth();
+    checkApplicationPage();
     
     // Listen for Turnstile token
     const handleMessage = (event: MessageEvent) => {
@@ -70,6 +78,23 @@ export default function KodKodApp() {
       window.removeEventListener('message', handleMessage);
     };
   }, []);
+
+  // Check if current page is an application form
+  const checkApplicationPage = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) return;
+
+      const response = await chrome.tabs.sendMessage(tab.id, { action: 'checkApplicationPage' });
+      if (response) {
+        setIsApplicationPage(response.isApplicationPage);
+        setApplicationPlatform(response.platform);
+      }
+    } catch (e) {
+      // Content script might not be loaded yet
+      console.log('Could not check application page:', e);
+    }
+  };
 
   // Persist settings when they change
   useEffect(() => {
@@ -180,6 +205,72 @@ export default function KodKodApp() {
   const handleRetryTurnstile = () => {
     setTurnstileError(false);
     setTurnstileKey(prev => prev + 1); // Force iframe to reload
+  };
+
+  // Auto-fill form handler
+  const autoFillSteps = [
+    'Scanning form fields...',
+    'Matching your profile...',
+    'Filling application...',
+  ];
+
+  const handleAutoFill = async () => {
+    if (profiles.length === 0 || !turnstileToken) return;
+    
+    setAutoFilling(true);
+    setError(null);
+    setAutoFillResult(null);
+    setAutoFillStep(autoFillSteps[0]);
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) throw new Error('No active tab');
+
+      // Step 1: Scrape form fields
+      const scrapeResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrapeFormFields' });
+      if (!scrapeResponse?.fields || scrapeResponse.fields.length === 0) {
+        throw new Error('No form fields found on this page');
+      }
+
+      setAutoFillStep(autoFillSteps[1]);
+
+      // Step 2: Get fill values from API
+      const fillResponse = await fillForm({
+        fields: scrapeResponse.fields,
+        masterProfileId: profiles[0].id,
+        turnstileToken,
+        companyName: applicationPlatform || undefined,
+      });
+
+      if (!fillResponse.success) {
+        throw new Error('Failed to generate form values');
+      }
+
+      setAutoFillStep(autoFillSteps[2]);
+
+      // Step 3: Fill the form
+      const fillResult = await chrome.tabs.sendMessage(tab.id, { 
+        action: 'fillForm', 
+        values: fillResponse.values 
+      });
+
+      setAutoFillResult({
+        filled: fillResult.filled || 0,
+        failed: fillResult.failed || 0,
+      });
+
+      // Refetch credits
+      const newCredits = await fetchCredits();
+      setCredits(newCredits);
+
+    } catch (err: any) {
+      setError(err.message);
+      setTurnstileError(true);
+    } finally {
+      setAutoFilling(false);
+      setAutoFillStep('');
+      setTurnstileToken(null); // Token is single use
+    }
   };
   
   const handleDownloadResume = () => {
@@ -384,7 +475,24 @@ export default function KodKodApp() {
           </div>
         )}
 
-        {generating ? (
+        {/* Auto-fill result banner */}
+        {autoFillResult && (
+          <div className="p-3 bg-green-500/10 text-green-600 dark:text-green-400 text-sm rounded-lg border border-green-500/20 font-medium flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4" />
+            <span>
+              Filled {autoFillResult.filled} field{autoFillResult.filled !== 1 ? 's' : ''}
+              {autoFillResult.failed > 0 && ` (${autoFillResult.failed} couldn't be filled)`}
+            </span>
+            <button 
+              onClick={() => setAutoFillResult(null)}
+              className="ml-auto hover:text-green-700 dark:hover:text-green-300"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
+        {generating || autoFilling ? (
           <div className="flex-1 flex flex-col items-center justify-center border-2 border-border rounded-lg bg-gradient-to-br from-primary/5 via-background to-primary/10">
             <div className="text-center space-y-5 p-6">
               {/* Animated Icon */}
@@ -399,8 +507,12 @@ export default function KodKodApp() {
 
               {/* Main text */}
               <div className="space-y-1">
-                <h3 className="text-foreground font-semibold text-base">Generating Your Resume</h3>
-                <p className="text-muted-foreground text-xs">{generationStep}</p>
+                <h3 className="text-foreground font-semibold text-base">
+                  {autoFilling ? 'Auto-Filling Application' : 'Generating Your Resume'}
+                </h3>
+                <p className="text-muted-foreground text-xs">
+                  {autoFilling ? autoFillStep : generationStep}
+                </p>
               </div>
 
               {/* Animated shimmer progress bar */}
@@ -425,32 +537,37 @@ export default function KodKodApp() {
 
               {/* Progress steps with pulsing dots */}
               <div className="flex justify-center gap-4 text-[10px] text-muted-foreground">
-                <span className="flex items-center gap-1">
-                  <span
-                    className={`w-2 h-2 rounded-full animate-pulse ${
-                      generationSteps.indexOf(generationStep) >= 0 ? 'bg-primary' : 'bg-primary/30'
-                    }`}
-                  />
-                  Analyzing
-                </span>
-                <span className="flex items-center gap-1">
-                  <span
-                    className={`w-2 h-2 rounded-full animate-pulse ${
-                      generationSteps.indexOf(generationStep) >= 1 ? 'bg-primary' : 'bg-primary/30'
-                    }`}
-                    style={{ animationDelay: '0.5s' }}
-                  />
-                  Matching
-                </span>
-                <span className="flex items-center gap-1">
-                  <span
-                    className={`w-2 h-2 rounded-full animate-pulse ${
-                      generationSteps.indexOf(generationStep) >= 2 ? 'bg-primary' : 'bg-primary/30'
-                    }`}
-                    style={{ animationDelay: '1s' }}
-                  />
-                  Formatting
-                </span>
+                {autoFilling ? (
+                  <>
+                    <span className="flex items-center gap-1">
+                      <span className={`w-2 h-2 rounded-full animate-pulse ${autoFillSteps.indexOf(autoFillStep) >= 0 ? 'bg-primary' : 'bg-primary/30'}`} />
+                      Scanning
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className={`w-2 h-2 rounded-full animate-pulse ${autoFillSteps.indexOf(autoFillStep) >= 1 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '0.5s' }} />
+                      Matching
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className={`w-2 h-2 rounded-full animate-pulse ${autoFillSteps.indexOf(autoFillStep) >= 2 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '1s' }} />
+                      Filling
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-1">
+                      <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 0 ? 'bg-primary' : 'bg-primary/30'}`} />
+                      Analyzing
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 1 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '0.5s' }} />
+                      Matching
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 2 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '1s' }} />
+                      Formatting
+                    </span>
+                  </>
+                )}
               </div>
             </div>
 
@@ -584,10 +701,34 @@ export default function KodKodApp() {
           )}
         </div>
 
-        <div className="sticky bottom-0 bg-background pt-2 pb-4 mt-auto">
+        <div className="sticky bottom-0 bg-background pt-2 pb-4 mt-auto space-y-2">
+          {/* Auto-Fill Button - Only show on application pages */}
+          {isApplicationPage && (
+            <Button
+              onClick={handleAutoFill}
+              disabled={autoFilling || generating || profiles.length === 0 || !turnstileToken}
+              variant="outline"
+              className="w-full gap-2 h-11 border-2 border-primary/50 hover:border-primary hover:bg-primary/5"
+            >
+              {autoFilling ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Filling Application...
+                </>
+              ) : (
+                <>
+                  <ClipboardPen className="h-4 w-4" /> Auto-Fill Application
+                  {applicationPlatform && (
+                    <span className="text-xs text-muted-foreground">({applicationPlatform})</span>
+                  )}
+                </>
+              )}
+            </Button>
+          )}
+
+          {/* Generate Resume Button */}
           <Button
             onClick={handleGenerate}
-            disabled={generating || profiles.length === 0 || !jobDescription || !turnstileToken}
+            disabled={generating || autoFilling || profiles.length === 0 || !jobDescription || !turnstileToken}
             className="w-full gap-2 text-lg h-12 shadow-lg"
           >
             {generating ? (
@@ -608,10 +749,12 @@ export default function KodKodApp() {
             >
               Click to retry verification
             </button>
-          ) : !turnstileToken && !generating ? (
+          ) : !turnstileToken && !generating && !autoFilling ? (
             <p className="text-[10px] text-center text-muted-foreground mt-2">Preparing your session...</p>
-          ) : !generating ? (
-            <p className="text-[10px] text-center text-muted-foreground mt-2">Ready to generate your resume!</p>
+          ) : !generating && !autoFilling ? (
+            <p className="text-[10px] text-center text-muted-foreground mt-2">
+              {isApplicationPage ? 'Ready to auto-fill or generate resume!' : 'Ready to generate your resume!'}
+            </p>
           ) : null}
         </div>
       </main>

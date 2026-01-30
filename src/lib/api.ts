@@ -111,3 +111,48 @@ export async function fetchCredits(): Promise<CreditData> {
   
   return response.json();
 }
+
+// Form Auto-Fill Types and API
+export interface FormField {
+  id: string;
+  name: string;
+  label: string;
+  type: string;
+  options?: string[];
+  required: boolean;
+  placeholder?: string;
+  currentValue?: string;
+}
+
+export interface FormFillParams {
+  fields: FormField[];
+  masterProfileId: string;
+  turnstileToken: string;
+  jobTitle?: string;
+  companyName?: string;
+}
+
+export interface FormFillResponse {
+  success: boolean;
+  values: Record<string, string>;
+  fieldsProvided: number;
+  fieldsFilled: number;
+}
+
+export async function fillForm(data: FormFillParams): Promise<FormFillResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/form-fill`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || 'Failed to fill form');
+  }
+
+  return response.json();
+}
