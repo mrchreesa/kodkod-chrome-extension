@@ -637,7 +637,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       label: label || type,
       type: type || 'text',
       required: el.required || el.getAttribute('aria-required') === 'true',
-      placeholder: el.placeholder || undefined,
+      placeholder: (el as HTMLInputElement).placeholder || undefined,
       currentValue: el.value || undefined,
     };
 
@@ -767,11 +767,6 @@ function fillFormFields(values: Record<string, string>): { filled: number; faile
 
   console.log(`KodKod: Filled ${filled} fields, ${failed} failed`);
   return { filled, failed };
-}
-
-// Check if current page is an application form
-function isApplicationPage(): boolean {
-  return detectApplicationPlatform() !== null;
 }
 
 // Listen for messages from side panel

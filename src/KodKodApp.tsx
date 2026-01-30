@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from 'react';
-import { fetchProfiles, generateResume, fetchCredits, fillForm, type Profile, type CreditData, type FormField } from './lib/api';
+import { fetchProfiles, generateResume, fetchCredits, fillForm, type Profile, type CreditData } from './lib/api';
 import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X, ClipboardPen, CheckCircle2 } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Card } from './components/ui/Card';
