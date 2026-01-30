@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "KodKod Companion",
+  "version": "1.0.3",
+  "description": "Generate resumes and cover letters directly from job boards.",
+  "permissions": ["sidePanel", "activeTab"],
+  "host_permissions": ["*://*.kodkodai.com/*", "*://localhost/*"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.ts"]
+    }
+  ],
+  "action": {
+    "default_title": "Open KodKod",
+    "default_icon": {
+      "16": "public/icon-128.png",
+      "32": "public/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "public/icon-128.png",
+    "32": "public/icon-128.png",
+    "128": "public/icon-128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; frame-src http://localhost:3000 https://kodkodai.com https://www.kodkodai.com;"
+  }
+}
