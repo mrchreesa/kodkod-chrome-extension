@@ -34,6 +34,7 @@ export interface GenerateResumeParams {
   jobDescription: string;
   template: string;
   includeCoverLetter: boolean;
+  coverLetterOnly?: boolean;
   turnstileToken: string;
   skipSummary?: boolean;
   useUKEnglish?: boolean;
@@ -42,7 +43,7 @@ export interface GenerateResumeParams {
 export interface GenerateResumeResponse {
   success: boolean;
   resumeId: string;
-  html: string;
+  html: string | null;
   coverLetterHtml: string | null;
   jobTitle: string;
   companyName: string;
