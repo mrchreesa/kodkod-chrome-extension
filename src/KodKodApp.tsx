@@ -533,7 +533,81 @@ export default function KodKodApp() {
           </div>
         )}
 
-        {generating || autoFilling ? (
+        {autoFilling ? (
+          <div className="flex-1 flex flex-col items-center justify-center border-2 border-border rounded-lg bg-gradient-to-br from-blue-500/5 via-background to-blue-500/10">
+            <div className="text-center space-y-5 p-6">
+              {/* Animated Form Fill Icon */}
+              <div className="relative mx-auto w-20 h-20 flex items-center justify-center">
+                <div className="absolute inset-0 bg-blue-500/20 rounded-xl" style={{ animation: 'pulse-ring 2s infinite' }} />
+                <div className="relative bg-background border-2 border-blue-500/50 rounded-lg p-3 shadow-lg" style={{ animation: 'gentle-float 3s infinite ease-in-out' }}>
+                  <ClipboardPen className="w-8 h-8 text-blue-500" style={{ animation: 'write-motion 1.5s infinite ease-in-out' }} />
+                </div>
+              </div>
+
+              {/* Main text */}
+              <div className="space-y-1">
+                <h3 className="text-foreground font-semibold text-base">Auto-Filling Application</h3>
+                <p className="text-muted-foreground text-xs">{autoFillStep}</p>
+              </div>
+
+              {/* Form fields animation */}
+              <div className="w-48 mx-auto space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="flex items-center gap-2" style={{ animationDelay: `${i * 0.3}s` }}>
+                    <div className="w-12 h-2 bg-muted rounded" />
+                    <div 
+                      className="flex-1 h-3 bg-muted rounded overflow-hidden"
+                      style={{ animation: `fill-field 2s infinite`, animationDelay: `${i * 0.4}s` }}
+                    >
+                      <div 
+                        className="h-full bg-blue-500/50 rounded"
+                        style={{ animation: `fill-progress 2s infinite ease-out`, animationDelay: `${i * 0.4}s` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Progress steps */}
+              <div className="flex justify-center gap-4 text-[10px] text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${autoFillSteps.indexOf(autoFillStep) >= 0 ? 'bg-blue-500 animate-pulse' : 'bg-blue-500/30'}`} />
+                  Scanning
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${autoFillSteps.indexOf(autoFillStep) >= 1 ? 'bg-blue-500 animate-pulse' : 'bg-blue-500/30'}`} />
+                  Matching
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${autoFillSteps.indexOf(autoFillStep) >= 2 ? 'bg-blue-500 animate-pulse' : 'bg-blue-500/30'}`} />
+                  Filling
+                </span>
+              </div>
+            </div>
+
+            {/* Form fill specific keyframes */}
+            <style>{`
+              @keyframes pulse-ring {
+                0%, 100% { transform: scale(1); opacity: 0.5; }
+                50% { transform: scale(1.1); opacity: 0.2; }
+              }
+              @keyframes gentle-float {
+                0%, 100% { transform: translateY(0); }
+                50% { transform: translateY(-5px); }
+              }
+              @keyframes write-motion {
+                0%, 100% { transform: rotate(0deg); }
+                25% { transform: rotate(-5deg); }
+                75% { transform: rotate(5deg); }
+              }
+              @keyframes fill-progress {
+                0% { width: 0%; }
+                50% { width: 100%; }
+                100% { width: 100%; }
+              }
+            `}</style>
+          </div>
+        ) : generating ? (
           <div className="flex-1 flex flex-col items-center justify-center border-2 border-border rounded-lg bg-gradient-to-br from-primary/5 via-background to-primary/10">
             <div className="text-center space-y-5 p-6">
               {/* Animated Icon */}
@@ -578,37 +652,18 @@ export default function KodKodApp() {
 
               {/* Progress steps with pulsing dots */}
               <div className="flex justify-center gap-4 text-[10px] text-muted-foreground">
-                {autoFilling ? (
-                  <>
-                    <span className="flex items-center gap-1">
-                      <span className={`w-2 h-2 rounded-full animate-pulse ${autoFillSteps.indexOf(autoFillStep) >= 0 ? 'bg-primary' : 'bg-primary/30'}`} />
-                      Scanning
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className={`w-2 h-2 rounded-full animate-pulse ${autoFillSteps.indexOf(autoFillStep) >= 1 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '0.5s' }} />
-                      Matching
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className={`w-2 h-2 rounded-full animate-pulse ${autoFillSteps.indexOf(autoFillStep) >= 2 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '1s' }} />
-                      Filling
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="flex items-center gap-1">
-                      <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 0 ? 'bg-primary' : 'bg-primary/30'}`} />
-                      Analyzing
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 1 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '0.5s' }} />
-                      Matching
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 2 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '1s' }} />
-                      Formatting
-                    </span>
-                  </>
-                )}
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 0 ? 'bg-primary' : 'bg-primary/30'}`} />
+                  Analyzing
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 1 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '0.5s' }} />
+                  Matching
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 2 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '1s' }} />
+                  Formatting
+                </span>
               </div>
             </div>
 
