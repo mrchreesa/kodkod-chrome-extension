@@ -1,7 +1,7 @@
 
 import { useEffect, useState } from 'react';
-import { fetchProfiles, generateResume, fetchCredits, type Profile, type CreditData } from './lib/api';
-import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X } from 'lucide-react';
+import { fetchProfiles, generateResume, fetchCredits, fillForm, type Profile, type CreditData } from './lib/api';
+import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X, ClipboardPen, CheckCircle2 } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Card } from './components/ui/Card';
 import { Textarea } from './components/ui/Textarea';
@@ -25,6 +25,13 @@ export default function KodKodApp() {
   const [credits, setCredits] = useState<CreditData | null>(null);
   const { theme, setTheme } = useTheme();
   
+  // Auto-fill state
+  const [isApplicationPage, setIsApplicationPage] = useState(false);
+  const [applicationPlatform, setApplicationPlatform] = useState<string | null>(null);
+  const [autoFilling, setAutoFilling] = useState(false);
+  const [autoFillResult, setAutoFillResult] = useState<{ filled: number; failed: number } | null>(null);
+  const [autoFillStep, setAutoFillStep] = useState<string>('');
+  
   // Generation Options - Initialize from localStorage if available
   const [skipSummary, setSkipSummary] = useState(() => {
     const saved = localStorage.getItem('kodkod_skipSummary');
@@ -36,6 +43,10 @@ export default function KodKodApp() {
   });
   const [includeCoverLetter, setIncludeCoverLetter] = useState(() => {
     const saved = localStorage.getItem('kodkod_includeCoverLetter');
+    return saved ? JSON.parse(saved) : false;
+  });
+  const [coverLetterOnly, setCoverLetterOnly] = useState(() => {
+    const saved = localStorage.getItem('kodkod_coverLetterOnly');
     return saved ? JSON.parse(saved) : false;
   });
   const [selectedTemplate, setSelectedTemplate] = useState(() => {
@@ -58,6 +69,7 @@ export default function KodKodApp() {
 
   useEffect(() => {
     checkAuth();
+    checkApplicationPage();
     
     // Listen for Turnstile token
     const handleMessage = (event: MessageEvent) => {
@@ -71,13 +83,31 @@ export default function KodKodApp() {
     };
   }, []);
 
+  // Check if current page is an application form
+  const checkApplicationPage = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) return;
+
+      const response = await chrome.tabs.sendMessage(tab.id, { action: 'checkApplicationPage' });
+      if (response) {
+        setIsApplicationPage(response.isApplicationPage);
+        setApplicationPlatform(response.platform);
+      }
+    } catch (e) {
+      // Content script might not be loaded yet
+      console.log('Could not check application page:', e);
+    }
+  };
+
   // Persist settings when they change
   useEffect(() => {
     localStorage.setItem('kodkod_skipSummary', JSON.stringify(skipSummary));
     localStorage.setItem('kodkod_useUKEnglish', JSON.stringify(useUKEnglish));
     localStorage.setItem('kodkod_includeCoverLetter', JSON.stringify(includeCoverLetter));
+    localStorage.setItem('kodkod_coverLetterOnly', JSON.stringify(coverLetterOnly));
     localStorage.setItem('kodkod_selectedTemplate', selectedTemplate);
-  }, [skipSummary, useUKEnglish, includeCoverLetter, selectedTemplate]);
+  }, [skipSummary, useUKEnglish, includeCoverLetter, coverLetterOnly, selectedTemplate]);
 
   const checkAuth = async () => {
     setLoading(true);
@@ -109,14 +139,34 @@ export default function KodKodApp() {
     try {
       const response = await chrome.tabs.sendMessage(tab.id, { action: 'scrape' });
       if (response && response.content) {
-        setJobDescription(response.content);
+        const content = response.content.trim();
+        
+        // Check if content is too short or empty
+        if (!content) {
+          setError('No job description found on this page. Try refreshing the page and try again.');
+          return;
+        }
+        
+        if (content.length < 50) {
+          setError('Very little text found. Please refresh the page and wait for it to fully load, then try again.');
+          return;
+        }
+        
+        if (content.split('\n').length <= 2 && content.length < 200) {
+          setError('Only a small amount of text was found. Make sure you\'re on a job posting page, refresh it, and try again.');
+          return;
+        }
+        
+        setJobDescription(content);
         if (response.source && response.source !== 'generic') {
           setScrapeSource(response.source);
         }
+      } else {
+        setError('No content found. Please refresh the page and make sure it\'s fully loaded, then try again.');
       }
     } catch (e) {
       console.error(e);
-      setError('Could not access page content. Try refreshing the page.');
+      setError('Could not access page content. Please refresh the page and try again.');
     }
   };
 
@@ -126,7 +176,11 @@ export default function KodKodApp() {
   const [turnstileError, setTurnstileError] = useState(false);
   const [turnstileKey, setTurnstileKey] = useState(0); // Used to force re-render iframe
 
-  const generationSteps = [
+  const generationSteps = coverLetterOnly ? [
+    'Analyzing job requirements...',
+    'Crafting your message...',
+    'Formatting cover letter...',
+  ] : [
     'Analyzing job requirements...',
     'Matching your experience...',
     'Formatting resume...',
@@ -152,13 +206,14 @@ export default function KodKodApp() {
         masterProfileId: profiles[0].id, // Use first profile
         jobDescription,
         template: selectedTemplate,
-        includeCoverLetter,
+        includeCoverLetter: coverLetterOnly ? false : includeCoverLetter,
+        coverLetterOnly,
         turnstileToken,
         skipSummary,
         useUKEnglish,
       });
 
-      setGeneratedHtml(result.html);
+      setGeneratedHtml(result.html || null);
       setCoverLetterHtml(result.coverLetterHtml || null);
       setCompanyName(result.companyName || '');
 
@@ -180,6 +235,72 @@ export default function KodKodApp() {
   const handleRetryTurnstile = () => {
     setTurnstileError(false);
     setTurnstileKey(prev => prev + 1); // Force iframe to reload
+  };
+
+  // Auto-fill form handler
+  const autoFillSteps = [
+    'Scanning form fields...',
+    'Matching your profile...',
+    'Filling application...',
+  ];
+
+  const handleAutoFill = async () => {
+    if (profiles.length === 0 || !turnstileToken) return;
+    
+    setAutoFilling(true);
+    setError(null);
+    setAutoFillResult(null);
+    setAutoFillStep(autoFillSteps[0]);
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) throw new Error('No active tab');
+
+      // Step 1: Scrape form fields
+      const scrapeResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrapeFormFields' });
+      if (!scrapeResponse?.fields || scrapeResponse.fields.length === 0) {
+        throw new Error('No form fields found on this page');
+      }
+
+      setAutoFillStep(autoFillSteps[1]);
+
+      // Step 2: Get fill values from API
+      const fillResponse = await fillForm({
+        fields: scrapeResponse.fields,
+        masterProfileId: profiles[0].id,
+        turnstileToken,
+        companyName: applicationPlatform || undefined,
+      });
+
+      if (!fillResponse.success) {
+        throw new Error('Failed to generate form values');
+      }
+
+      setAutoFillStep(autoFillSteps[2]);
+
+      // Step 3: Fill the form
+      const fillResult = await chrome.tabs.sendMessage(tab.id, { 
+        action: 'fillForm', 
+        values: fillResponse.values 
+      });
+
+      setAutoFillResult({
+        filled: fillResult.filled || 0,
+        failed: fillResult.failed || 0,
+      });
+
+      // Refetch credits
+      const newCredits = await fetchCredits();
+      setCredits(newCredits);
+
+    } catch (err: any) {
+      setError(err.message);
+      setTurnstileError(true);
+    } finally {
+      setAutoFilling(false);
+      setAutoFillStep('');
+      setTurnstileToken(null); // Token is single use
+    }
   };
   
   const handleDownloadResume = () => {
@@ -293,25 +414,27 @@ export default function KodKodApp() {
     );
   }
 
-  if (generatedHtml) {
+  if (generatedHtml || coverLetterHtml) {
     return (
       <div className="p-4 h-screen flex flex-col bg-background">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-primary flex items-center gap-2">
             <Sparkles className="h-5 w-5" /> Generated!
           </h2>
-          <Button variant="ghost" size="sm" onClick={() => setGeneratedHtml(null)}>
+          <Button variant="ghost" size="sm" onClick={() => { setGeneratedHtml(null); setCoverLetterHtml(null); }}>
             Back
           </Button>
         </div>
         
         <div className="flex-1 flex flex-col gap-4 overflow-hidden mb-4">
-          <Card className="flex-1 overflow-hidden relative border-2 flex flex-col">
-             <div className="bg-muted/50 px-3 py-1 text-[10px] font-medium text-muted-foreground border-b flex justify-between items-center">
-               <span>Resume</span>
-             </div>
-             <iframe srcDoc={generatedHtml} className="w-full flex-1 border-0 bg-white" title="Resume Preview" />
-          </Card>
+          {generatedHtml && (
+            <Card className="flex-1 overflow-hidden relative border-2 flex flex-col">
+               <div className="bg-muted/50 px-3 py-1 text-[10px] font-medium text-muted-foreground border-b flex justify-between items-center">
+                 <span>Resume</span>
+               </div>
+               <iframe srcDoc={generatedHtml} className="w-full flex-1 border-0 bg-white" title="Resume Preview" />
+            </Card>
+          )}
           
           {coverLetterHtml && (
             <Card className="flex-1 overflow-hidden relative border-2 flex flex-col">
@@ -324,18 +447,20 @@ export default function KodKodApp() {
         </div>
         
         <div className="flex gap-2">
-          <Button
-            onClick={handleDownloadResume}
-            className="flex-1 gap-2"
-          >
-            <Download className="h-4 w-4" /> Resume PDF
-          </Button>
+          {generatedHtml && (
+            <Button
+              onClick={handleDownloadResume}
+              className="flex-1 gap-2"
+            >
+              <Download className="h-4 w-4" /> Resume PDF
+            </Button>
+          )}
           
           {coverLetterHtml && (
             <Button
               onClick={handleDownloadCoverLetter}
-              className="flex-1 gap-2"
-              variant="outline"
+              className={`flex-1 gap-2 ${!generatedHtml ? '' : ''}`}
+              variant={generatedHtml ? 'outline' : 'default'}
             >
               <Download className="h-4 w-4" /> Cover Letter
             </Button>
@@ -362,6 +487,13 @@ export default function KodKodApp() {
                 </span>
               </div>
             )}
+            <button
+              onClick={checkAuth}
+              className="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-colors"
+              title="Refresh"
+            >
+              <RefreshCw className="h-4 w-4 text-muted-foreground" />
+            </button>
             <Button
               variant="ghost"
               size="sm"
@@ -384,7 +516,98 @@ export default function KodKodApp() {
           </div>
         )}
 
-        {generating ? (
+        {/* Auto-fill result banner */}
+        {autoFillResult && (
+          <div className="p-3 bg-green-500/10 text-green-600 dark:text-green-400 text-sm rounded-lg border border-green-500/20 font-medium flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4" />
+            <span>
+              Filled {autoFillResult.filled} field{autoFillResult.filled !== 1 ? 's' : ''}
+              {autoFillResult.failed > 0 && ` (${autoFillResult.failed} couldn't be filled)`}
+            </span>
+            <button 
+              onClick={() => setAutoFillResult(null)}
+              className="ml-auto hover:text-green-700 dark:hover:text-green-300"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
+        {autoFilling ? (
+          <div className="flex-1 flex flex-col items-center justify-center border-2 border-border rounded-lg bg-gradient-to-br from-blue-500/5 via-background to-blue-500/10">
+            <div className="text-center space-y-5 p-6">
+              {/* Animated Form Fill Icon */}
+              <div className="relative mx-auto w-20 h-20 flex items-center justify-center">
+                <div className="absolute inset-0 bg-blue-500/20 rounded-xl" style={{ animation: 'pulse-ring 2s infinite' }} />
+                <div className="relative bg-background border-2 border-blue-500/50 rounded-lg p-3 shadow-lg" style={{ animation: 'gentle-float 3s infinite ease-in-out' }}>
+                  <ClipboardPen className="w-8 h-8 text-blue-500" style={{ animation: 'write-motion 1.5s infinite ease-in-out' }} />
+                </div>
+              </div>
+
+              {/* Main text */}
+              <div className="space-y-1">
+                <h3 className="text-foreground font-semibold text-base">Auto-Filling Application</h3>
+                <p className="text-muted-foreground text-xs">{autoFillStep}</p>
+              </div>
+
+              {/* Form fields animation */}
+              <div className="w-48 mx-auto space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="flex items-center gap-2" style={{ animationDelay: `${i * 0.3}s` }}>
+                    <div className="w-12 h-2 bg-muted rounded" />
+                    <div 
+                      className="flex-1 h-3 bg-muted rounded overflow-hidden"
+                      style={{ animation: `fill-field 2s infinite`, animationDelay: `${i * 0.4}s` }}
+                    >
+                      <div 
+                        className="h-full bg-blue-500/50 rounded"
+                        style={{ animation: `fill-progress 2s infinite ease-out`, animationDelay: `${i * 0.4}s` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Progress steps */}
+              <div className="flex justify-center gap-4 text-[10px] text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${autoFillSteps.indexOf(autoFillStep) >= 0 ? 'bg-blue-500 animate-pulse' : 'bg-blue-500/30'}`} />
+                  Scanning
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${autoFillSteps.indexOf(autoFillStep) >= 1 ? 'bg-blue-500 animate-pulse' : 'bg-blue-500/30'}`} />
+                  Matching
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${autoFillSteps.indexOf(autoFillStep) >= 2 ? 'bg-blue-500 animate-pulse' : 'bg-blue-500/30'}`} />
+                  Filling
+                </span>
+              </div>
+            </div>
+
+            {/* Form fill specific keyframes */}
+            <style>{`
+              @keyframes pulse-ring {
+                0%, 100% { transform: scale(1); opacity: 0.5; }
+                50% { transform: scale(1.1); opacity: 0.2; }
+              }
+              @keyframes gentle-float {
+                0%, 100% { transform: translateY(0); }
+                50% { transform: translateY(-5px); }
+              }
+              @keyframes write-motion {
+                0%, 100% { transform: rotate(0deg); }
+                25% { transform: rotate(-5deg); }
+                75% { transform: rotate(5deg); }
+              }
+              @keyframes fill-progress {
+                0% { width: 0%; }
+                50% { width: 100%; }
+                100% { width: 100%; }
+              }
+            `}</style>
+          </div>
+        ) : generating ? (
           <div className="flex-1 flex flex-col items-center justify-center border-2 border-border rounded-lg bg-gradient-to-br from-primary/5 via-background to-primary/10">
             <div className="text-center space-y-5 p-6">
               {/* Animated Icon */}
@@ -399,8 +622,12 @@ export default function KodKodApp() {
 
               {/* Main text */}
               <div className="space-y-1">
-                <h3 className="text-foreground font-semibold text-base">Generating Your Resume</h3>
-                <p className="text-muted-foreground text-xs">{generationStep}</p>
+                <h3 className="text-foreground font-semibold text-base">
+                  {autoFilling ? 'Auto-Filling Application' : coverLetterOnly ? 'Generating Your Cover Letter' : 'Generating Your Resume'}
+                </h3>
+                <p className="text-muted-foreground text-xs">
+                  {autoFilling ? autoFillStep : generationStep}
+                </p>
               </div>
 
               {/* Animated shimmer progress bar */}
@@ -426,29 +653,15 @@ export default function KodKodApp() {
               {/* Progress steps with pulsing dots */}
               <div className="flex justify-center gap-4 text-[10px] text-muted-foreground">
                 <span className="flex items-center gap-1">
-                  <span
-                    className={`w-2 h-2 rounded-full animate-pulse ${
-                      generationSteps.indexOf(generationStep) >= 0 ? 'bg-primary' : 'bg-primary/30'
-                    }`}
-                  />
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 0 ? 'bg-primary' : 'bg-primary/30'}`} />
                   Analyzing
                 </span>
                 <span className="flex items-center gap-1">
-                  <span
-                    className={`w-2 h-2 rounded-full animate-pulse ${
-                      generationSteps.indexOf(generationStep) >= 1 ? 'bg-primary' : 'bg-primary/30'
-                    }`}
-                    style={{ animationDelay: '0.5s' }}
-                  />
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 1 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '0.5s' }} />
                   Matching
                 </span>
                 <span className="flex items-center gap-1">
-                  <span
-                    className={`w-2 h-2 rounded-full animate-pulse ${
-                      generationSteps.indexOf(generationStep) >= 2 ? 'bg-primary' : 'bg-primary/30'
-                    }`}
-                    style={{ animationDelay: '1s' }}
-                  />
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${generationSteps.indexOf(generationStep) >= 2 ? 'bg-primary' : 'bg-primary/30'}`} style={{ animationDelay: '1s' }} />
                   Formatting
                 </span>
               </div>
@@ -526,11 +739,12 @@ export default function KodKodApp() {
           </div>
         </div>
 
-        <div className="space-y-2">
+        <div className={`space-y-2 transition-opacity ${coverLetterOnly ? 'opacity-50 pointer-events-none' : ''}`}>
           <label className="text-sm font-medium text-muted-foreground uppercase tracking-wider text-[10px]">Resume Template</label>
           <Select
             value={selectedTemplate}
             onChange={(e) => setSelectedTemplate(e.target.value)}
+            disabled={coverLetterOnly}
           >
             <option value="harvard">Harvard Style (Classic)</option>
             <option value="modern">Hybrid (Modern)</option>
@@ -538,13 +752,36 @@ export default function KodKodApp() {
           </Select>
         </div>
 
-        <div className="space-y-3 p-4 border rounded-lg bg-card/50">
+        {/* Cover Letter Only Toggle */}
+        <div className="p-4 border rounded-lg bg-card/50">
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => setCoverLetterOnly(!coverLetterOnly)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                coverLetterOnly ? 'bg-primary' : 'bg-muted'
+              }`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                  coverLetterOnly ? 'translate-x-5' : 'translate-x-1'
+                }`}
+              />
+            </button>
+            <div>
+              <p className="text-sm font-medium">Cover Letter Only</p>
+              <p className="text-[10px] text-muted-foreground">Generate only a cover letter, no resume</p>
+            </div>
+          </div>
+        </div>
+
+        <div className={`space-y-3 p-4 border rounded-lg bg-card/50 transition-opacity ${coverLetterOnly ? 'opacity-50 pointer-events-none' : ''}`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
               <Checkbox 
                 id="skipSummary" 
                 checked={skipSummary}
                 onCheckedChange={(checked) => setSkipSummary(checked as boolean)}
+                disabled={coverLetterOnly}
               />
               <label
                 htmlFor="skipSummary"
@@ -565,6 +802,7 @@ export default function KodKodApp() {
               id="coverLetter" 
               checked={includeCoverLetter}
               onCheckedChange={(checked) => setIncludeCoverLetter(checked as boolean)}
+              disabled={coverLetterOnly}
             />
             <label
               htmlFor="coverLetter"
@@ -584,15 +822,43 @@ export default function KodKodApp() {
           )}
         </div>
 
-        <div className="sticky bottom-0 bg-background pt-2 pb-4 mt-auto">
+        <div className="sticky bottom-0 bg-background pt-2 pb-4 mt-auto space-y-2">
+          {/* Auto-Fill Button - Only show on application pages */}
+          {isApplicationPage && (
+            <Button
+              onClick={handleAutoFill}
+              disabled={autoFilling || generating || profiles.length === 0 || !turnstileToken}
+              variant="outline"
+              className="w-full gap-2 h-11 border-2 border-primary/50 hover:border-primary hover:bg-primary/5"
+            >
+              {autoFilling ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Filling Application...
+                </>
+              ) : (
+                <>
+                  <ClipboardPen className="h-4 w-4" /> Auto-Fill Application
+                  {applicationPlatform && (
+                    <span className="text-xs text-muted-foreground">({applicationPlatform})</span>
+                  )}
+                </>
+              )}
+            </Button>
+          )}
+
+          {/* Generate Button */}
           <Button
             onClick={handleGenerate}
-            disabled={generating || profiles.length === 0 || !jobDescription || !turnstileToken}
+            disabled={generating || autoFilling || profiles.length === 0 || !jobDescription || !turnstileToken}
             className="w-full gap-2 text-lg h-12 shadow-lg"
           >
             {generating ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin" /> Generating...
+              </>
+            ) : coverLetterOnly ? (
+              <>
+                <Sparkles className="h-5 w-5" /> Generate Cover Letter
               </>
             ) : (
               <>
@@ -604,14 +870,16 @@ export default function KodKodApp() {
           {turnstileError ? (
             <button
               onClick={handleRetryTurnstile}
-              className="text-[10px] text-center text-primary hover:underline mt-2 w-full"
+              className="text-sm font-medium text-center text-red-500 hover:text-red-600 hover:underline mt-2 w-full py-2 px-4 border-2 border-red-500/30 rounded-lg bg-red-500/10 hover:bg-red-500/20 transition-colors"
             >
-              Click to retry verification
+              ⚠️ Verification failed — Click to retry
             </button>
-          ) : !turnstileToken && !generating ? (
+          ) : !turnstileToken && !generating && !autoFilling ? (
             <p className="text-[10px] text-center text-muted-foreground mt-2">Preparing your session...</p>
-          ) : !generating ? (
-            <p className="text-[10px] text-center text-muted-foreground mt-2">Ready to generate your resume!</p>
+          ) : !generating && !autoFilling ? (
+            <p className="text-[10px] text-center text-muted-foreground mt-2">
+              {isApplicationPage ? 'Ready to auto-fill or generate resume!' : 'Ready to generate your resume!'}
+            </p>
           ) : null}
         </div>
       </main>
