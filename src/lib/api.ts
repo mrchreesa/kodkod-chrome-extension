@@ -2,10 +2,22 @@ const API_BASE_URL = import.meta.env.DEV
   ? 'http://localhost:3000' 
   : 'https://www.kodkodai.com';
 
+export interface ProfileContact {
+  full_name?: string;
+  email?: string;
+  phone?: string;
+  location?: string;
+  linkedin?: string;
+  github?: string;
+  portfolio?: string;
+  website?: string;
+}
+
 export interface Profile {
   id: string;
   name: string;
   updated_at: string;
+  contact_info?: ProfileContact | null;
 }
 
 console.log(API_BASE_URL);
@@ -366,4 +378,26 @@ export async function detachDebugger(tabId: number): Promise<void> {
       () => resolve()
     );
   });
+}
+
+// ============================================
+// PROFILE CONTACT CACHING (for heuristic fill)
+// ============================================
+
+const CONTACT_CACHE_KEY = 'kodkod_profile_contact';
+
+export function getCachedProfileContact(profileId: string): ProfileContact | null {
+  try {
+    const cached = localStorage.getItem(CONTACT_CACHE_KEY);
+    if (!cached) return null;
+    const data = JSON.parse(cached);
+    if (data.profileId === profileId) return data.contact;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function cacheProfileContact(profileId: string, contact: ProfileContact): void {
+  localStorage.setItem(CONTACT_CACHE_KEY, JSON.stringify({ profileId, contact }));
 }

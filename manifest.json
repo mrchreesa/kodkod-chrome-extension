@@ -17,6 +17,13 @@
       "matches": ["<all_urls>"],
       "js": ["src/content.ts"],
       "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/main-world.ts"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
     }
   ],
   "action": {

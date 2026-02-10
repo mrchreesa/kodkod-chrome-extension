@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from 'react';
-import { fetchProfiles, generateResume, fetchCredits, formAgentFill, formAgentLearn, formAgentAnswer, fillFormWithDebugger, detachDebugger, type Profile, type CreditData, type FormLearning, type DebuggerFillField } from './lib/api';
+import { fetchProfiles, generateResume, fetchCredits, formAgentFill, formAgentLearn, formAgentAnswer, fillFormWithDebugger, detachDebugger, getCachedProfileContact, cacheProfileContact, type Profile, type ProfileContact, type CreditData, type FormLearning, type DebuggerFillField } from './lib/api';
 import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X, ClipboardPen, CheckCircle2, RotateCcw, FileCheck, RotateCw, Eye, EyeOff, ExternalLink, Copy, Check } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Card } from './components/ui/Card';
@@ -393,6 +393,60 @@ export default function KodKodApp() {
     'Filling application...',
   ];
 
+  // Heuristic field mapper: instantly match common fields to profile contact data
+  const heuristicPatterns: { pattern: RegExp; field: keyof ProfileContact; split?: 'first' | 'last' }[] = [
+    { pattern: /\b(first\s*name|given\s*name)\b/i, field: 'full_name', split: 'first' },
+    { pattern: /\b(last\s*name|surname|family\s*name)\b/i, field: 'full_name', split: 'last' },
+    { pattern: /\b(full\s*name|your\s*name|candidate\s*name)\b/i, field: 'full_name' },
+    { pattern: /\be-?mail\b/i, field: 'email' },
+    { pattern: /\b(phone|mobile|telephone|cell)\b/i, field: 'phone' },
+    { pattern: /\blinkedin\b/i, field: 'linkedin' },
+    { pattern: /\b(website|portfolio|personal\s*site)\b/i, field: 'website' },
+    { pattern: /\b(city|location|address)\b/i, field: 'location' },
+  ];
+
+  function applyHeuristics(
+    fields: any[],
+    contact: ProfileContact
+  ): { heuristicValues: Record<string, string>; remainingFields: any[] } {
+    const heuristicValues: Record<string, string> = {};
+    const remainingFields: any[] = [];
+
+    for (const field of fields) {
+      // Only apply heuristics to simple text-like fields
+      if (!['text', 'email', 'tel', 'url'].includes(field.type)) {
+        remainingFields.push(field);
+        continue;
+      }
+
+      let matched = false;
+      const label = (field.label || '').toLowerCase();
+
+      for (const { pattern, field: contactField, split } of heuristicPatterns) {
+        if (pattern.test(label)) {
+          let value = contact[contactField] || '';
+          if (!value) break;
+
+          if (split && contactField === 'full_name') {
+            const parts = value.split(/\s+/);
+            if (split === 'first') value = parts[0] || '';
+            else value = parts.slice(1).join(' ') || '';
+          }
+
+          if (value) {
+            heuristicValues[field.id] = value;
+            matched = true;
+            break;
+          }
+        }
+      }
+
+      if (!matched) remainingFields.push(field);
+    }
+
+    return { heuristicValues, remainingFields };
+  }
+
   const handleAutoFill = async () => {
     if (profiles.length === 0 || !turnstileToken) return;
     
@@ -412,16 +466,32 @@ export default function KodKodApp() {
         throw new Error('No form fields found on this page');
       }
 
-      // Separate fields into regular vs debugger-needing (comboboxes)
-      const regularFields = scrapeResponse.fields.filter((f: any) => !f.needsDebugger);
+      // Apply heuristic mapping for instant contact field fills
+      let heuristicValues: Record<string, string> = {};
+      let fieldsForAI = scrapeResponse.fields;
+
+      const contact = getCachedProfileContact(profiles[0].id) || profiles[0].contact_info;
+      if (contact) {
+        // Cache for future use
+        cacheProfileContact(profiles[0].id, contact);
+        const result = applyHeuristics(scrapeResponse.fields, contact);
+        heuristicValues = result.heuristicValues;
+        fieldsForAI = result.remainingFields;
+        console.log(`KodKod: Heuristic matched ${Object.keys(heuristicValues).length} fields, ${fieldsForAI.length} remaining for AI`);
+      }
+
+      // Separate fields into regular, custom-dropdown, and debugger-needing
+      const regularFields = scrapeResponse.fields.filter((f: any) => !f.needsDebugger && f.type !== 'custom-dropdown');
+      const customDropdownFields = scrapeResponse.fields.filter((f: any) => f.type === 'custom-dropdown');
       const debuggerFields = scrapeResponse.fields.filter((f: any) => f.needsDebugger);
-      
-      console.log(`KodKod: ${regularFields.length} regular fields, ${debuggerFields.length} dropdown fields`);
+
+      console.log(`KodKod: ${regularFields.length} regular, ${customDropdownFields.length} custom dropdown, ${debuggerFields.length} debugger fields`);
 
       setAutoFillStep(autoFillSteps[1]);
 
+      // Only send remaining fields (not heuristic-matched) to AI
       const fillResponse = await formAgentFill({
-        fields: scrapeResponse.fields,
+        fields: fieldsForAI,
         masterProfileId: profiles[0].id,
         turnstileToken,
         sessionId: formSessionId || undefined,
@@ -429,6 +499,9 @@ export default function KodKodApp() {
         jobDescription: jobDescription || undefined,
         companyName: companyName || applicationPlatform || undefined,
       });
+
+      // Merge heuristic values with AI values (AI takes precedence for any overlap)
+      fillResponse.values = { ...heuristicValues, ...fillResponse.values };
 
       if (!fillResponse.success) {
         throw new Error('Failed to generate form values');
@@ -472,9 +545,34 @@ export default function KodKodApp() {
         totalFailed += fillResult.failed || 0;
       }
 
-      // Step 2: Fill dropdown fields with Chrome Debugger API
-      if (debuggerFields.length > 0) {
-        const debuggerFillFields: DebuggerFillField[] = debuggerFields
+      // Step 2: Fill custom dropdowns via click simulation (React Select, MUI, Ant Design)
+      const debuggerFallbackFields: any[] = [];
+      if (customDropdownFields.length > 0) {
+        const customFields = customDropdownFields.filter((f: any) => fillResponse.values[f.id]);
+        const customValues: Record<string, string> = {};
+        customFields.forEach((f: any) => { customValues[f.id] = fillResponse.values[f.id]; });
+
+        if (customFields.length > 0) {
+          console.log(`KodKod: Filling ${customFields.length} custom dropdowns via click simulation`);
+          const customResult = await chrome.tabs.sendMessage(tab.id, {
+            action: 'fillCustomDropdowns',
+            fields: customFields,
+            values: customValues,
+          });
+
+          totalFilled += customResult.filled || 0;
+          // Fields that failed click simulation fall back to debugger
+          if (customResult.failedFields?.length > 0) {
+            const failedCustomFields = customFields.filter((f: any) => customResult.failedFields.includes(f.id));
+            debuggerFallbackFields.push(...failedCustomFields);
+          }
+        }
+      }
+
+      // Step 3: Fill dropdown fields with Chrome Debugger API (ARIA comboboxes + failed custom dropdowns)
+      const allDebuggerFields = [...debuggerFields, ...debuggerFallbackFields];
+      if (allDebuggerFields.length > 0) {
+        const debuggerFillFields: DebuggerFillField[] = allDebuggerFields
           .filter((field: any) => fillResponse.values[field.id])
           .map((field: any) => ({
             selector: field.buttonSelector || field.selector,

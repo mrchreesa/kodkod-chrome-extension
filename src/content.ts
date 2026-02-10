@@ -349,14 +349,15 @@ export interface FormField {
   id: string;
   name: string;
   label: string;
-  type: string; // 'text', 'textarea', 'radio', 'checkbox', 'email', 'tel', 'combobox', etc.
-  options?: { value: string; text: string }[]; // For radio buttons and comboboxes
+  type: string; // 'text', 'textarea', 'radio', 'checkbox', 'email', 'tel', 'select', 'combobox', 'custom-dropdown', etc.
+  options?: { value: string; text: string }[]; // For radio buttons, selects, and comboboxes
   required: boolean;
   placeholder?: string;
   currentValue?: string;
   selector?: string;
   buttonSelector?: string; // For ARIA combobox trigger buttons
   needsDebugger?: boolean; // Flag for complex dropdowns that need debugger API
+  dropdownLib?: string; // For custom dropdowns: 'react-select', 'mui', 'ant-design', etc.
 }
 
 // Detect if we're on a known application platform
@@ -556,6 +557,135 @@ function findComboboxButton(combobox: HTMLElement): HTMLElement | null {
   return combobox; // Fall back to clicking the combobox itself
 }
 
+// ============================================
+// FUZZY MATCHING UTILITY
+// ============================================
+
+function fuzzyMatch(target: string, candidate: string): number {
+  const t = target.toLowerCase().trim();
+  const c = candidate.toLowerCase().trim();
+  if (t === c) return 1.0;
+  if (c.includes(t) || t.includes(c)) return 0.8;
+  // Word overlap ratio
+  const tWords = t.split(/\s+/);
+  const cWords = c.split(/\s+/);
+  const overlap = tWords.filter(w => cWords.some(cw => cw.includes(w) || w.includes(cw))).length;
+  return overlap / Math.max(tWords.length, cWords.length);
+}
+
+function findBestOption(
+  options: { element?: HTMLElement; text: string }[],
+  value: string,
+  threshold = 0.5
+): { element?: HTMLElement; text: string; score: number } | null {
+  let best: { element?: HTMLElement; text: string; score: number } | null = null;
+  for (const opt of options) {
+    const score = fuzzyMatch(value, opt.text);
+    if (score >= threshold && (!best || score > best.score)) {
+      best = { ...opt, score };
+    }
+  }
+  return best;
+}
+
+// ============================================
+// CUSTOM DROPDOWN FILLING (click simulation)
+// ============================================
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fillCustomDropdown(field: FormField, value: string): Promise<boolean> {
+  // Find the trigger element
+  const triggerSelectors: Record<string, string> = {
+    'react-select': '[class*="react-select"] [class*="-control"]',
+    'mui': '.MuiSelect-root, .MuiAutocomplete-root input',
+    'ant-design': '.ant-select .ant-select-selector',
+  };
+
+  let trigger: HTMLElement | null = null;
+  if (field.selector) {
+    trigger = document.querySelector(field.selector) as HTMLElement;
+  }
+  if (!trigger && field.dropdownLib && triggerSelectors[field.dropdownLib]) {
+    trigger = document.querySelector(triggerSelectors[field.dropdownLib]) as HTMLElement;
+  }
+  if (!trigger) return false;
+
+  try {
+    // Open dropdown: use mousedown for React Select (it listens to mousedown, not click)
+    trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    // If it's an input (autocomplete), type the value to filter
+    if (trigger instanceof HTMLInputElement) {
+      trigger.focus();
+      if (nativeInputValueSetter) {
+        nativeInputValueSetter.call(trigger, value);
+      } else {
+        trigger.value = value;
+      }
+      trigger.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Wait for menu to render
+    await wait(300);
+
+    // Search for options via cascade of selectors
+    const optionSelectors = [
+      '[role="option"]',
+      '[class*="react-select__option"]',
+      '.MuiMenuItem-root',
+      '.ant-select-item-option',
+      'li[data-value]',
+    ];
+
+    let optionElements: HTMLElement[] = [];
+    for (const sel of optionSelectors) {
+      const found = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+      if (found.length > 0) {
+        optionElements = found;
+        break;
+      }
+    }
+
+    if (optionElements.length === 0) {
+      // Close dropdown and fail
+      document.body.click();
+      return false;
+    }
+
+    // Fuzzy match the best option
+    const optionsWithText = optionElements.map(el => ({
+      element: el,
+      text: el.textContent?.trim() || '',
+    }));
+
+    const match = findBestOption(optionsWithText, value);
+
+    if (match?.element) {
+      match.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      match.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return true;
+    }
+
+    // No match found, close dropdown
+    document.body.click();
+    return false;
+  } catch (err) {
+    console.error('KodKod: Error filling custom dropdown:', err);
+    document.body.click();
+    return false;
+  }
+}
+
+// Reference to MAIN world input setter for use in fillCustomDropdown
+const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+  HTMLInputElement.prototype,
+  'value'
+)?.set;
+
 // Scrape all form fields from the page (TEXT + RADIO + COMBOBOX)
 function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
   const platform = detectApplicationPlatform();
@@ -605,7 +735,107 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
     console.log(`KodKod: Found combobox "${label}" with ${options.length} options`);
   });
 
-  // PASS 2: Find text inputs, textareas, and radio buttons (skip those inside comboboxes)
+  // PASS 1.5: Detect custom dropdowns (React Select, MUI, Ant Design, generic ARIA)
+  const customDropdownSelectors: { selector: string; lib: string }[] = [
+    { selector: '[class*="react-select"] [class*="-control"]', lib: 'react-select' },
+    { selector: '.MuiSelect-root', lib: 'mui' },
+    { selector: '.MuiAutocomplete-root', lib: 'mui' },
+    { selector: '.ant-select', lib: 'ant-design' },
+    { selector: '[aria-haspopup="listbox"]:not([role="combobox"]):not(select)', lib: 'generic-aria' },
+  ];
+  const customDropdownElements = new Set<HTMLElement>();
+
+  for (const { selector, lib } of customDropdownSelectors) {
+    document.querySelectorAll(selector).forEach((element, index) => {
+      const el = element as HTMLElement;
+
+      // Skip invisible
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return;
+
+      // Skip if already detected as ARIA combobox
+      for (const cb of comboboxElements) {
+        if (cb.contains(el) || el.contains(cb)) return;
+      }
+      // Skip if already detected as custom dropdown
+      for (const cd of customDropdownElements) {
+        if (cd.contains(el) || el.contains(cd)) return;
+      }
+
+      customDropdownElements.add(el);
+
+      const label = getLabelForInput(el);
+      if (!label) return; // Skip unlabeled custom dropdowns
+      const fieldId = el.id || `custom_dropdown_${lib}_${index}`;
+
+      // Try to get current value text
+      const valueEl = el.querySelector('[class*="-singleValue"], [class*="-placeholder"], .MuiSelect-nativeInput, .ant-select-selection-item');
+      const currentValue = valueEl?.textContent?.trim() || '';
+
+      fields.push({
+        id: fieldId,
+        name: el.getAttribute('name') || '',
+        label,
+        type: 'custom-dropdown',
+        required: el.getAttribute('aria-required') === 'true',
+        currentValue: currentValue || undefined,
+        selector: generateSelector(el),
+        needsDebugger: false, // We'll handle via click simulation
+        dropdownLib: lib,
+      });
+
+      console.log(`KodKod: Found custom dropdown "${label}" (${lib})`);
+    });
+  }
+
+  // PASS 2: Find native <select> elements
+  const selects = document.querySelectorAll('select');
+  selects.forEach((element, index) => {
+    const el = element as HTMLSelectElement;
+
+    // Skip invisible
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    // Skip selects inside comboboxes
+    for (const cb of comboboxElements) {
+      if (cb.contains(el)) return;
+    }
+
+    const label = getLabelForInput(el);
+    const fieldId = el.id || el.name || `select_${index}`;
+
+    // Extract options, filtering out placeholders
+    const options: { value: string; text: string }[] = [];
+    for (let i = 0; i < el.options.length; i++) {
+      const opt = el.options[i];
+      const text = opt.text.trim();
+      const value = opt.value;
+      // Skip placeholder options
+      if (!value && /^(select|choose|pick|--|—|\s*)$/i.test(text)) continue;
+      if (!value && text === '') continue;
+      if (text) options.push({ value, text });
+    }
+
+    const currentOption = el.options[el.selectedIndex];
+    const currentValue = currentOption ? currentOption.text.trim() : '';
+
+    fields.push({
+      id: fieldId,
+      name: el.name || '',
+      label: label || 'Dropdown',
+      type: 'select',
+      required: el.required || el.getAttribute('aria-required') === 'true',
+      currentValue: currentValue || undefined,
+      selector: generateSelector(el),
+      options: options.length > 0 ? options : undefined,
+      needsDebugger: false,
+    });
+
+    console.log(`KodKod: Found native <select> "${label}" with ${options.length} options`);
+  });
+
+  // PASS 3: Find text inputs, textareas, radio buttons, and checkboxes (skip those inside comboboxes)
   const inputs = document.querySelectorAll('input, textarea');
 
   inputs.forEach((element, index) => {
@@ -618,25 +848,25 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
     
     const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
     
-    // Only process text-like inputs and radio buttons
-    const allowedTypes = ['text', 'email', 'tel', 'url', 'number', 'textarea', 'radio'];
+    // Only process text-like inputs, radio buttons, and checkboxes
+    const allowedTypes = ['text', 'email', 'tel', 'url', 'number', 'textarea', 'radio', 'checkbox'];
     if (!allowedTypes.includes(type) && el.tagName !== 'TEXTAREA') return;
-    
+
     // Skip invisible
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return;
-    
+
     const fieldId = el.id || el.name || `field_${index}`;
-    
+
     // Skip duplicate radio buttons (group by name)
     if (type === 'radio') {
       if (processedNames.has((el as HTMLInputElement).name)) return;
       processedNames.add((el as HTMLInputElement).name);
     }
-    
+
     const label = getLabelForInput(el);
     if (!label && !['email', 'tel'].includes(type)) return;
-    
+
     const field: FormField = {
       id: fieldId,
       name: el.name || '',
@@ -644,20 +874,22 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       type: el.tagName === 'TEXTAREA' ? 'textarea' : type,
       required: el.required || el.getAttribute('aria-required') === 'true',
       placeholder: (el as HTMLInputElement).placeholder || undefined,
-      currentValue: el.value || undefined,
+      currentValue: type === 'checkbox'
+        ? ((el as HTMLInputElement).checked ? 'true' : 'false')
+        : (el.value || undefined),
       selector: generateSelector(el),
       needsDebugger: false,
     };
-    
+
     // Get options for radio buttons
     if (type === 'radio' && (el as HTMLInputElement).name) {
       field.options = getRadioOptions((el as HTMLInputElement).name);
     }
-    
+
     fields.push(field);
   });
 
-  console.log(`KodKod: Scraped ${fields.length} form fields (text + radio + combobox)`);
+  console.log(`KodKod: Scraped ${fields.length} form fields (text + radio + checkbox + select + combobox)`);
   return { fields, platform: platform?.name || null };
 }
 
@@ -665,26 +897,68 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
 function captureFormValues(): Record<string, { label: string; value: string; type: string; options?: { value: string; text: string }[] }> {
   const values: Record<string, { label: string; value: string; type: string; options?: { value: string; text: string }[] }> = {};
   const processedNames = new Set<string>();
-  
+
+  // Capture native <select> values
+  const selects = document.querySelectorAll('select');
+  selects.forEach((element, index) => {
+    const el = element as HTMLSelectElement;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    const fieldId = el.id || el.name || `select_${index}`;
+    const label = getLabelForInput(el);
+    const selectedOption = el.options[el.selectedIndex];
+    const selectedText = selectedOption ? selectedOption.text.trim() : '';
+
+    if (selectedText) {
+      const options: { value: string; text: string }[] = [];
+      for (let i = 0; i < el.options.length; i++) {
+        const opt = el.options[i];
+        if (opt.value || opt.text.trim()) {
+          options.push({ value: opt.value, text: opt.text.trim() });
+        }
+      }
+      values[fieldId] = {
+        label: label || 'Dropdown',
+        value: selectedText,
+        type: 'select',
+        options: options.length > 0 ? options : undefined,
+      };
+    }
+  });
+
+  // Capture input and textarea values
   const inputs = document.querySelectorAll('input, textarea');
-  
+
   inputs.forEach((element, index) => {
     const el = element as HTMLInputElement | HTMLTextAreaElement;
     const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
-    
-    // Only process text-like inputs and radio buttons
-    const allowedTypes = ['text', 'email', 'tel', 'url', 'number', 'textarea', 'radio'];
+
+    // Only process text-like inputs, radio buttons, and checkboxes
+    const allowedTypes = ['text', 'email', 'tel', 'url', 'number', 'textarea', 'radio', 'checkbox'];
     if (!allowedTypes.includes(type) && el.tagName !== 'TEXTAREA') return;
-    
+
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return;
-    
+
     const fieldId = el.id || el.name || `field_${index}`;
-    
+
+    // Checkboxes
+    if (type === 'checkbox') {
+      const label = getLabelForInput(el);
+      if (!label) return;
+      values[fieldId] = {
+        label,
+        value: (el as HTMLInputElement).checked ? 'true' : 'false',
+        type: 'checkbox',
+      };
+      return;
+    }
+
     if (type === 'radio') {
       if (processedNames.has((el as HTMLInputElement).name)) return;
       processedNames.add((el as HTMLInputElement).name);
-      
+
       // Find selected radio
       const selected = document.querySelector(`input[type="radio"][name="${(el as HTMLInputElement).name}"]:checked`) as HTMLInputElement;
       if (selected) {
@@ -697,10 +971,10 @@ function captureFormValues(): Record<string, { label: string; value: string; typ
       }
       return;
     }
-    
+
     const label = getLabelForInput(el);
     if (!label && !['email', 'tel'].includes(type)) return;
-    
+
     if (el.value) {
       values[fieldId] = {
         label: label || type,
@@ -709,22 +983,127 @@ function captureFormValues(): Record<string, { label: string; value: string; typ
       };
     }
   });
-  
+
   return values;
 }
 
+// ============================================
+// MAIN WORLD BRIDGE (React compatibility)
+// ============================================
+
+let mainWorldReady = false;
+const pendingFillRequests = new Map<string, { resolve: (success: boolean) => void; timer: ReturnType<typeof setTimeout> }>();
+
+// Listen for MAIN world ready signal
+window.addEventListener('kodkod-main-world-ready', () => {
+  mainWorldReady = true;
+  console.log('KodKod: MAIN world bridge connected');
+});
+
+// Listen for fill responses from MAIN world
+window.addEventListener('kodkod-fill-response', ((event: CustomEvent<{ id: string; success: boolean; error?: string }>) => {
+  const { id, success } = event.detail;
+  const pending = pendingFillRequests.get(id);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingFillRequests.delete(id);
+    pending.resolve(success);
+  }
+}) as EventListener);
+
+function fillViaMainWorld(selector: string, value: string, fieldType: string): Promise<boolean> {
+  if (!mainWorldReady) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    const id = `fill_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const timer = setTimeout(() => {
+      pendingFillRequests.delete(id);
+      resolve(false);
+    }, 2000);
+
+    pendingFillRequests.set(id, { resolve, timer });
+
+    window.dispatchEvent(new CustomEvent('kodkod-fill-request', {
+      detail: { id, selector, value, fieldType },
+    }));
+  });
+}
+
 // Fill a single form field
-function fillFormField(fieldId: string, value: string): boolean {
+async function fillFormField(fieldId: string, value: string): Promise<boolean> {
   let element = document.getElementById(fieldId) as HTMLElement | null;
   if (!element) {
     element = document.querySelector(`[name="${fieldId}"]`) as HTMLElement | null;
   }
   if (!element) return false;
-  
+
   const tagName = element.tagName;
   const type = (element as HTMLInputElement).type?.toLowerCase() || '';
-  
+
+  // Try MAIN world first (React-compatible) for text inputs, textareas, selects, and checkboxes
+  if (mainWorldReady && (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT')) {
+    const selector = generateSelector(element);
+    const fieldType = type === 'checkbox' ? 'checkbox' : tagName === 'SELECT' ? 'select' : tagName === 'TEXTAREA' ? 'textarea' : 'text';
+
+    // For selects, we need to resolve value text to actual option value first
+    let fillValue = value;
+    if (tagName === 'SELECT') {
+      const selectEl = element as HTMLSelectElement;
+      const lowerValue = value.toLowerCase();
+      for (let i = 0; i < selectEl.options.length; i++) {
+        if (selectEl.options[i].text.trim().toLowerCase() === lowerValue || selectEl.options[i].value === value) {
+          fillValue = selectEl.options[i].value;
+          break;
+        }
+      }
+    }
+
+    const mainWorldSuccess = await fillViaMainWorld(selector, fillValue, fieldType);
+    if (mainWorldSuccess) return true;
+    // Fall through to direct DOM manipulation if MAIN world failed
+  }
+
   try {
+    // Native <select> elements
+    if (tagName === 'SELECT') {
+      const selectEl = element as HTMLSelectElement;
+      const lowerValue = value.toLowerCase();
+
+      // Try exact value match, then exact text match, then contains match
+      for (let i = 0; i < selectEl.options.length; i++) {
+        if (selectEl.options[i].value === value) {
+          selectEl.value = selectEl.options[i].value;
+          selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+      }
+      for (let i = 0; i < selectEl.options.length; i++) {
+        if (selectEl.options[i].text.trim().toLowerCase() === lowerValue) {
+          selectEl.value = selectEl.options[i].value;
+          selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+      }
+      for (let i = 0; i < selectEl.options.length; i++) {
+        const optText = selectEl.options[i].text.trim().toLowerCase();
+        if (optText.includes(lowerValue) || lowerValue.includes(optText)) {
+          selectEl.value = selectEl.options[i].value;
+          selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // Checkboxes
+    if (type === 'checkbox') {
+      const shouldCheck = ['yes', 'true', '1', 'on', 'checked'].includes(value.toLowerCase());
+      (element as HTMLInputElement).checked = shouldCheck;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
     // Radio buttons
     if (type === 'radio') {
       const radios = document.querySelectorAll(`input[type="radio"][name="${(element as HTMLInputElement).name}"]`);
@@ -740,7 +1119,7 @@ function fillFormField(fieldId: string, value: string): boolean {
       }
       return false;
     }
-    
+
     // Text inputs and textareas
     if (tagName === 'INPUT' || tagName === 'TEXTAREA') {
       (element as HTMLInputElement).value = value;
@@ -748,7 +1127,7 @@ function fillFormField(fieldId: string, value: string): boolean {
       element.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     }
-    
+
     return false;
   } catch (err) {
     console.error(`KodKod: Error filling ${fieldId}:`, err);
@@ -757,20 +1136,20 @@ function fillFormField(fieldId: string, value: string): boolean {
 }
 
 // Fill all form fields
-function fillFormFields(values: Record<string, string>): { filled: number; failed: number } {
+async function fillFormFields(values: Record<string, string>): Promise<{ filled: number; failed: number }> {
   let filled = 0;
   let failed = 0;
-  
+
   for (const [fieldId, value] of Object.entries(values)) {
     if (!value) continue;
-    
-    if (fillFormField(fieldId, value)) {
+
+    if (await fillFormField(fieldId, value)) {
       filled++;
     } else {
       failed++;
     }
   }
-  
+
   console.log(`KodKod: Filled ${filled} fields, ${failed} failed`);
   return { filled, failed };
 }
@@ -846,7 +1225,7 @@ function getFieldValueByQuestion(question: string): { found: boolean; value: str
 // Listen for messages from side panel
 chrome.runtime.onMessage.addListener(
   (
-    request: { action: string; values?: Record<string, string>; question?: string },
+    request: { action: string; values?: Record<string, string>; question?: string; fields?: FormField[] },
     _sender: chrome.runtime.MessageSender,
     sendResponse: (response?: any) => void
   ) => {
@@ -889,10 +1268,36 @@ chrome.runtime.onMessage.addListener(
 
     if (request.action === 'fillForm') {
       if (request.values) {
-        const result = fillFormFields(request.values);
-        sendResponse(result);
+        fillFormFields(request.values).then(result => sendResponse(result));
+        return true; // Keep channel open for async response
       } else {
         sendResponse({ error: 'No values provided' });
+      }
+    }
+
+    // Fill custom dropdowns via click simulation (React Select, MUI, Ant Design)
+    if (request.action === 'fillCustomDropdowns') {
+      if (request.fields && request.values) {
+        (async () => {
+          let filled = 0;
+          let failed = 0;
+          const failedFields: string[] = [];
+          for (const field of request.fields!) {
+            const value = request.values![field.id];
+            if (!value) continue;
+            const success = await fillCustomDropdown(field, value);
+            if (success) {
+              filled++;
+            } else {
+              failed++;
+              failedFields.push(field.id);
+            }
+          }
+          sendResponse({ filled, failed, failedFields });
+        })();
+        return true; // Keep channel open for async response
+      } else {
+        sendResponse({ error: 'No fields or values provided' });
       }
     }
 
