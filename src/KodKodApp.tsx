@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from 'react';
-import { fetchProfiles, generateResume, fetchCredits, formAgentFill, formAgentLearn, formAgentAnswer, type Profile, type CreditData, type FormLearning } from './lib/api';
+import { fetchProfiles, generateResume, fetchCredits, formAgentFill, formAgentLearn, formAgentAnswer, fillFormWithDebugger, detachDebugger, type Profile, type CreditData, type FormLearning, type DebuggerFillField } from './lib/api';
 import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X, ClipboardPen, CheckCircle2, RotateCcw, FileCheck, RotateCw, Eye, EyeOff, ExternalLink, Copy, Check } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Card } from './components/ui/Card';
@@ -412,6 +412,12 @@ export default function KodKodApp() {
         throw new Error('No form fields found on this page');
       }
 
+      // Separate fields into regular vs debugger-needing (comboboxes)
+      const regularFields = scrapeResponse.fields.filter((f: any) => !f.needsDebugger);
+      const debuggerFields = scrapeResponse.fields.filter((f: any) => f.needsDebugger);
+      
+      console.log(`KodKod: ${regularFields.length} regular fields, ${debuggerFields.length} dropdown fields`);
+
       setAutoFillStep(autoFillSteps[1]);
 
       const fillResponse = await formAgentFill({
@@ -445,18 +451,57 @@ export default function KodKodApp() {
 
       setAutoFillStep(autoFillSteps[2]);
 
-      const fillResult = await chrome.tabs.sendMessage(tab.id, { 
-        action: 'fillForm', 
-        values: fillResponse.values 
-      });
+      let totalFilled = 0;
+      let totalFailed = 0;
 
-      const filledCount = fillResult.filled || 0;
+      // Step 1: Fill regular fields with content script (text inputs, radio buttons)
+      if (regularFields.length > 0) {
+        const regularValues: Record<string, string> = {};
+        regularFields.forEach((field: any) => {
+          if (fillResponse.values[field.id]) {
+            regularValues[field.id] = fillResponse.values[field.id];
+          }
+        });
+        
+        const fillResult = await chrome.tabs.sendMessage(tab.id, { 
+          action: 'fillForm', 
+          values: regularValues 
+        });
+        
+        totalFilled += fillResult.filled || 0;
+        totalFailed += fillResult.failed || 0;
+      }
+
+      // Step 2: Fill dropdown fields with Chrome Debugger API
+      if (debuggerFields.length > 0) {
+        const debuggerFillFields: DebuggerFillField[] = debuggerFields
+          .filter((field: any) => fillResponse.values[field.id])
+          .map((field: any) => ({
+            selector: field.buttonSelector || field.selector,
+            value: fillResponse.values[field.id],
+            type: field.type, // 'combobox', 'yesno', etc.
+          }));
+        
+        if (debuggerFillFields.length > 0) {
+          console.log(`KodKod: Filling ${debuggerFillFields.length} dropdowns with debugger API`);
+          
+          const debuggerResult = await fillFormWithDebugger(tab.id, debuggerFillFields);
+          totalFilled += debuggerResult.filled;
+          totalFailed += debuggerResult.failed;
+          
+          console.log('KodKod: Debugger fill results:', debuggerResult.results);
+          
+          // Detach debugger after filling
+          await detachDebugger(tab.id);
+        }
+      }
+
       setAutoFillResult({
-        filled: filledCount,
-        failed: fillResult.failed || 0,
+        filled: totalFilled,
+        failed: totalFailed,
         memoriesUsed: fillResponse.memoriesUsed,
       });
-      setFieldsFilledCount(prev => prev + filledCount);
+      setFieldsFilledCount(prev => prev + totalFilled);
 
       setShowLearnPrompt(true);
 

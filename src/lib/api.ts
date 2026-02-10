@@ -279,3 +279,91 @@ export async function formAgentAnswer(data: FormAgentAnswerParams): Promise<Form
 
   return response.json();
 }
+
+// ============================================
+// DEBUGGER-BASED FORM FILLING (for dropdowns)
+// ============================================
+
+export interface DebuggerFillField {
+  selector: string;
+  value: string;
+  type: string; // 'combobox', 'yesno', 'text', etc.
+}
+
+export interface DebuggerFillResult {
+  filled: number;
+  failed: number;
+  results: { selector: string; success: boolean; method?: string }[];
+}
+
+// Fill form fields using Chrome Debugger API (for complex dropdowns)
+export async function fillFormWithDebugger(
+  tabId: number,
+  fields: DebuggerFillField[]
+): Promise<DebuggerFillResult> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        action: 'debugger_fillForm',
+        tabId,
+        fields,
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('KodKod: Debugger fill error:', chrome.runtime.lastError);
+          resolve({ filled: 0, failed: fields.length, results: [] });
+        } else {
+          resolve(response);
+        }
+      }
+    );
+  });
+}
+
+// Select a single dropdown using debugger
+export async function selectDropdownWithDebugger(
+  tabId: number,
+  selector: string,
+  value: string
+): Promise<{ success: boolean; method: string; error?: string }> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        action: 'debugger_selectDropdown',
+        tabId,
+        selector,
+        value,
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ success: false, method: 'error', error: chrome.runtime.lastError.message });
+        } else {
+          resolve(response);
+        }
+      }
+    );
+  });
+}
+
+// Get current tab ID
+export async function getCurrentTabId(): Promise<number | null> {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]?.id) {
+        resolve(tabs[0].id);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+// Detach debugger from tab
+export async function detachDebugger(tabId: number): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { action: 'debugger_detach', tabId },
+      () => resolve()
+    );
+  });
+}

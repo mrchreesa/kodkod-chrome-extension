@@ -349,12 +349,14 @@ export interface FormField {
   id: string;
   name: string;
   label: string;
-  type: string; // 'text', 'textarea', 'radio', 'checkbox', 'email', 'tel', etc.
-  options?: { value: string; text: string }[]; // For radio buttons
+  type: string; // 'text', 'textarea', 'radio', 'checkbox', 'email', 'tel', 'combobox', etc.
+  options?: { value: string; text: string }[]; // For radio buttons and comboboxes
   required: boolean;
   placeholder?: string;
   currentValue?: string;
   selector?: string;
+  buttonSelector?: string; // For ARIA combobox trigger buttons
+  needsDebugger?: boolean; // Flag for complex dropdowns that need debugger API
 }
 
 // Detect if we're on a known application platform
@@ -499,17 +501,121 @@ function getRadioOptions(name: string): { value: string; text: string }[] {
   return options;
 }
 
-// Scrape all form fields from the page (TEXT + RADIO ONLY)
+// Detect ARIA combobox options by opening and reading listbox
+function getComboboxOptions(combobox: HTMLElement): { value: string; text: string }[] {
+  const options: { value: string; text: string }[] = [];
+  
+  // Check aria-controls for the listbox ID
+  const listboxId = combobox.getAttribute('aria-controls') || combobox.getAttribute('aria-owns');
+  let listbox: HTMLElement | null = null;
+  
+  if (listboxId) {
+    listbox = document.getElementById(listboxId);
+  }
+  
+  // Also look for adjacent listbox
+  if (!listbox) {
+    listbox = combobox.parentElement?.querySelector('[role="listbox"]') || null;
+  }
+  
+  if (listbox) {
+    const optionElements = listbox.querySelectorAll('[role="option"]');
+    optionElements.forEach((opt) => {
+      const text = opt.textContent?.trim() || '';
+      const value = opt.getAttribute('data-value') || opt.getAttribute('id') || text;
+      if (text) {
+        options.push({ value, text });
+      }
+    });
+  }
+  
+  return options;
+}
+
+// Find the trigger button for an ARIA combobox
+function findComboboxButton(combobox: HTMLElement): HTMLElement | null {
+  // Check for button inside or adjacent to combobox
+  const internalButton = combobox.querySelector('button, [role="button"]');
+  if (internalButton) return internalButton as HTMLElement;
+  
+  // Check if combobox itself is clickable
+  if (combobox.getAttribute('tabindex') !== null || combobox.tagName === 'BUTTON') {
+    return combobox;
+  }
+  
+  // Look for adjacent button
+  const nextButton = combobox.nextElementSibling;
+  if (nextButton && (nextButton.tagName === 'BUTTON' || nextButton.getAttribute('role') === 'button')) {
+    return nextButton as HTMLElement;
+  }
+  
+  // Parent might have the button
+  const parentButton = combobox.parentElement?.querySelector('button, [role="button"]');
+  if (parentButton) return parentButton as HTMLElement;
+  
+  return combobox; // Fall back to clicking the combobox itself
+}
+
+// Scrape all form fields from the page (TEXT + RADIO + COMBOBOX)
 function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
   const platform = detectApplicationPlatform();
   const fields: FormField[] = [];
   const processedNames = new Set<string>();
+  const comboboxElements = new Set<HTMLElement>(); // Track combobox containers to skip their inputs
 
-  // Find all text inputs, textareas, and radio buttons
+  // PASS 1: Find all ARIA comboboxes first
+  const comboboxes = document.querySelectorAll('[role="combobox"]');
+  comboboxes.forEach((element, index) => {
+    const el = element as HTMLElement;
+    
+    // Skip invisible
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+    
+    // Mark this element and its children so we skip their inputs
+    comboboxElements.add(el);
+    
+    const label = getLabelForInput(el);
+    const fieldId = el.id || `combobox_${index}`;
+    const triggerButton = findComboboxButton(el);
+    const currentValue = el.textContent?.trim() || el.getAttribute('aria-label') || '';
+    
+    // Get options if listbox is visible
+    const options = getComboboxOptions(el);
+    
+    // Detect if this is a simple Yes/No dropdown
+    const isYesNo = options.length === 2 && 
+      options.some(o => o.text.toLowerCase() === 'yes') && 
+      options.some(o => o.text.toLowerCase() === 'no');
+    
+    const field: FormField = {
+      id: fieldId,
+      name: el.getAttribute('name') || '',
+      label: label || 'Dropdown',
+      type: isYesNo ? 'yesno' : 'combobox',
+      required: el.getAttribute('aria-required') === 'true',
+      currentValue: currentValue || undefined,
+      selector: generateSelector(el),
+      buttonSelector: triggerButton ? generateSelector(triggerButton) : undefined,
+      options: options.length > 0 ? options : undefined,
+      needsDebugger: true, // Flag that this needs debugger API
+    };
+    
+    fields.push(field);
+    console.log(`KodKod: Found combobox "${label}" with ${options.length} options`);
+  });
+
+  // PASS 2: Find text inputs, textareas, and radio buttons (skip those inside comboboxes)
   const inputs = document.querySelectorAll('input, textarea');
 
   inputs.forEach((element, index) => {
     const el = element as HTMLInputElement | HTMLTextAreaElement;
+    
+    // Skip inputs inside comboboxes
+    for (const cb of comboboxElements) {
+      if (cb.contains(el)) return;
+    }
+    
     const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
     
     // Only process text-like inputs and radio buttons
@@ -540,6 +646,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       placeholder: (el as HTMLInputElement).placeholder || undefined,
       currentValue: el.value || undefined,
       selector: generateSelector(el),
+      needsDebugger: false,
     };
     
     // Get options for radio buttons
@@ -550,7 +657,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
     fields.push(field);
   });
 
-  console.log(`KodKod: Scraped ${fields.length} form fields (text + radio only)`);
+  console.log(`KodKod: Scraped ${fields.length} form fields (text + radio + combobox)`);
   return { fields, platform: platform?.name || null };
 }
 
@@ -801,6 +908,14 @@ chrome.runtime.onMessage.addListener(
     if (request.action === 'getFieldValueByQuestion') {
       const result = getFieldValueByQuestion(request.question || '');
       sendResponse(result);
+    }
+
+    // Get info about which fields need debugger-based filling
+    if (request.action === 'getDebuggerFields') {
+      const { fields } = scrapeFormFields();
+      const debuggerFields = fields.filter(f => f.needsDebugger);
+      const regularFields = fields.filter(f => !f.needsDebugger);
+      sendResponse({ debuggerFields, regularFields });
     }
 
     return true;
