@@ -536,9 +536,10 @@ export default function KodKodApp() {
           }
         });
         
-        const fillResult = await chrome.tabs.sendMessage(tab.id, { 
-          action: 'fillForm', 
-          values: regularValues 
+        const fillResult = await chrome.tabs.sendMessage(tab.id, {
+          action: 'fillForm',
+          values: regularValues,
+          fields: regularFields,
         });
         
         totalFilled += fillResult.filled || 0;

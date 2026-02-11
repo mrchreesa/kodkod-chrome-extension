@@ -788,6 +788,80 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
     });
   }
 
+  // PASS 1.6: Detect ARIA radio groups, button toggles, and switches
+  // These are yes/no or multi-choice questions rendered as clickable buttons, not native inputs
+  const ariaRadioGroupElements = new Set<HTMLElement>();
+
+  // ARIA radiogroups with [role="radio"] children
+  document.querySelectorAll('[role="radiogroup"]').forEach((group, index) => {
+    const el = group as HTMLElement;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    // Skip if already detected as combobox or custom dropdown
+    for (const cb of comboboxElements) { if (cb.contains(el) || el.contains(cb)) return; }
+    for (const cd of customDropdownElements) { if (cd.contains(el) || el.contains(cd)) return; }
+
+    const radioOptions = Array.from(el.querySelectorAll('[role="radio"]')) as HTMLElement[];
+    if (radioOptions.length === 0) return;
+
+    ariaRadioGroupElements.add(el);
+
+    const label = getLabelForInput(el);
+    if (!label) return;
+    const fieldId = el.id || `aria_radiogroup_${index}`;
+
+    const options = radioOptions.map(opt => ({
+      value: opt.getAttribute('data-value') || opt.textContent?.trim() || '',
+      text: opt.textContent?.trim() || '',
+    })).filter(o => o.text);
+
+    const selectedOpt = radioOptions.find(opt => opt.getAttribute('aria-checked') === 'true');
+    const currentValue = selectedOpt?.textContent?.trim() || '';
+
+    fields.push({
+      id: fieldId,
+      name: el.getAttribute('name') || '',
+      label,
+      type: 'aria-radio',
+      required: el.getAttribute('aria-required') === 'true',
+      currentValue: currentValue || undefined,
+      selector: generateSelector(el),
+      options: options.length > 0 ? options : undefined,
+      needsDebugger: false,
+    });
+
+    console.log(`KodKod: Found ARIA radiogroup "${label}" with ${options.length} options`);
+  });
+
+  // [role="switch"] elements (toggle switches)
+  document.querySelectorAll('[role="switch"]').forEach((element, index) => {
+    const el = element as HTMLElement;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    for (const cb of comboboxElements) { if (cb.contains(el)) return; }
+    for (const rg of ariaRadioGroupElements) { if (rg.contains(el)) return; }
+
+    const label = getLabelForInput(el);
+    if (!label) return;
+    const fieldId = el.id || `switch_${index}`;
+    const isChecked = el.getAttribute('aria-checked') === 'true';
+
+    fields.push({
+      id: fieldId,
+      name: el.getAttribute('name') || '',
+      label,
+      type: 'switch',
+      required: el.getAttribute('aria-required') === 'true',
+      currentValue: isChecked ? 'true' : 'false',
+      selector: generateSelector(el),
+      needsDebugger: false,
+    });
+
+    console.log(`KodKod: Found switch "${label}" (${isChecked ? 'on' : 'off'})`);
+  });
+
   // PASS 2: Find native <select> elements
   const selects = document.querySelectorAll('select');
   selects.forEach((element, index) => {
@@ -927,6 +1001,47 @@ function captureFormValues(): Record<string, { label: string; value: string; typ
     }
   });
 
+  // Capture ARIA radio group values
+  document.querySelectorAll('[role="radiogroup"]').forEach((group, index) => {
+    const el = group as HTMLElement;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    const label = getLabelForInput(el);
+    if (!label) return;
+    const fieldId = el.id || `aria_radiogroup_${index}`;
+    const selected = el.querySelector('[role="radio"][aria-checked="true"]') as HTMLElement | null;
+    if (selected) {
+      const options = Array.from(el.querySelectorAll('[role="radio"]')).map(opt => ({
+        value: opt.getAttribute('data-value') || opt.textContent?.trim() || '',
+        text: opt.textContent?.trim() || '',
+      })).filter(o => o.text);
+
+      values[fieldId] = {
+        label,
+        value: selected.textContent?.trim() || '',
+        type: 'aria-radio',
+        options: options.length > 0 ? options : undefined,
+      };
+    }
+  });
+
+  // Capture ARIA switch values
+  document.querySelectorAll('[role="switch"]').forEach((element, index) => {
+    const el = element as HTMLElement;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    const label = getLabelForInput(el);
+    if (!label) return;
+    const fieldId = el.id || `switch_${index}`;
+    values[fieldId] = {
+      label,
+      value: el.getAttribute('aria-checked') === 'true' ? 'true' : 'false',
+      type: 'switch',
+    };
+  });
+
   // Capture input and textarea values
   const inputs = document.querySelectorAll('input, textarea');
 
@@ -1030,10 +1145,14 @@ function fillViaMainWorld(selector: string, value: string, fieldType: string): P
 }
 
 // Fill a single form field
-async function fillFormField(fieldId: string, value: string): Promise<boolean> {
+async function fillFormField(fieldId: string, value: string, selectorHint?: string): Promise<boolean> {
   let element = document.getElementById(fieldId) as HTMLElement | null;
   if (!element) {
     element = document.querySelector(`[name="${fieldId}"]`) as HTMLElement | null;
+  }
+  // Fallback: try the selector hint (for ARIA radiogroups, switches, etc.)
+  if (!element && selectorHint) {
+    element = document.querySelector(selectorHint) as HTMLElement | null;
   }
   if (!element) return false;
 
@@ -1120,6 +1239,34 @@ async function fillFormField(fieldId: string, value: string): Promise<boolean> {
       return false;
     }
 
+    // ARIA radio groups ([role="radiogroup"] with [role="radio"] children)
+    if (element.getAttribute('role') === 'radiogroup') {
+      const radioOptions = Array.from(element.querySelectorAll('[role="radio"]')) as HTMLElement[];
+      const lowerValue = value.toLowerCase();
+      for (const opt of radioOptions) {
+        const optText = (opt.textContent?.trim() || '').toLowerCase();
+        const optValue = (opt.getAttribute('data-value') || '').toLowerCase();
+        if (optText === lowerValue || optValue === lowerValue ||
+            optText.includes(lowerValue) || lowerValue.includes(optText)) {
+          opt.click();
+          opt.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // ARIA switches ([role="switch"])
+    if (element.getAttribute('role') === 'switch') {
+      const shouldBeOn = ['yes', 'true', '1', 'on', 'checked'].includes(value.toLowerCase());
+      const isOn = element.getAttribute('aria-checked') === 'true';
+      if (shouldBeOn !== isOn) {
+        element.click();
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return true;
+    }
+
     // Text inputs and textareas
     if (tagName === 'INPUT' || tagName === 'TEXTAREA') {
       (element as HTMLInputElement).value = value;
@@ -1136,14 +1283,22 @@ async function fillFormField(fieldId: string, value: string): Promise<boolean> {
 }
 
 // Fill all form fields
-async function fillFormFields(values: Record<string, string>): Promise<{ filled: number; failed: number }> {
+async function fillFormFields(values: Record<string, string>, fieldMeta?: FormField[]): Promise<{ filled: number; failed: number }> {
   let filled = 0;
   let failed = 0;
+
+  // Build a lookup from field ID to selector for fallback
+  const selectorMap = new Map<string, string>();
+  if (fieldMeta) {
+    for (const f of fieldMeta) {
+      if (f.selector) selectorMap.set(f.id, f.selector);
+    }
+  }
 
   for (const [fieldId, value] of Object.entries(values)) {
     if (!value) continue;
 
-    if (await fillFormField(fieldId, value)) {
+    if (await fillFormField(fieldId, value, selectorMap.get(fieldId))) {
       filled++;
     } else {
       failed++;
@@ -1268,7 +1423,7 @@ chrome.runtime.onMessage.addListener(
 
     if (request.action === 'fillForm') {
       if (request.values) {
-        fillFormFields(request.values).then(result => sendResponse(result));
+        fillFormFields(request.values, request.fields).then(result => sendResponse(result));
         return true; // Keep channel open for async response
       } else {
         sendResponse({ error: 'No values provided' });
