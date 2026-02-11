@@ -1472,13 +1472,13 @@ export default function KodKodApp() {
                   {/* Manual Q&A Section */}
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Train Agent</span>
+                      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Manual Questions</span>
                     </div>
-                    
+
                     <Textarea
                       value={manualQuestion}
                       onChange={(e) => setManualQuestion(e.target.value)}
-                      placeholder="Paste a question from the form..."
+                      placeholder="Paste a form question here..."
                       className="min-h-[60px] text-sm"
                     />
                     
@@ -1577,7 +1577,7 @@ export default function KodKodApp() {
                     
                     {!manualAnswer && (
                       <p className="text-[10px] text-muted-foreground">
-                        Paste form questions here to generate answers. Edit before saving to memory.
+                        For questions not filled automatically — paste them here, get an AI answer, and save to memory so they're filled next time.
                       </p>
                     )}
                   </div>
