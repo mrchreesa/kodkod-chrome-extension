@@ -20,7 +20,7 @@ export interface Profile {
   contact_info?: ProfileContact | null;
 }
 
-console.log(API_BASE_URL);
+if (import.meta.env.DEV) console.log('[KodKod:API] BASE_URL:', API_BASE_URL);
 export async function fetchProfiles(): Promise<Profile[]> {
   const response = await fetch(`${API_BASE_URL}/api/profiles`, {
     credentials: 'include',
@@ -181,16 +181,18 @@ export interface FormAgentFillParams {
   jobDescription?: string;
   jobTitle?: string;
   companyName?: string;
+  platform?: string;
 }
 
 export interface FormAgentFillResponse {
   success: boolean;
   sessionId: string;
   values: Record<string, string>;
-  sources: Record<string, 'memory' | 'ai' | 'profile'>;
+  sources: Record<string, 'memory' | 'ai' | 'profile' | 'global'>;
   fieldsProvided: number;
   fieldsFilled: number;
   memoriesUsed: number;
+  globalUsed: number;
   creditCharged: boolean;
 }
 
@@ -263,6 +265,9 @@ export interface FormAgentAnswerParams {
   masterProfileId: string;
   turnstileToken: string;
   saveToMemory?: boolean;
+  jobDescription?: string;
+  companyName?: string;
+  jobTitle?: string;
 }
 
 export interface FormAgentAnswerResponse {
@@ -322,7 +327,7 @@ export async function fillFormWithDebugger(
       },
       (response) => {
         if (chrome.runtime.lastError) {
-          console.error('KodKod: Debugger fill error:', chrome.runtime.lastError);
+          if (import.meta.env.DEV) console.error('[KodKod:API] Debugger fill error:', chrome.runtime.lastError);
           resolve({ filled: 0, failed: fields.length, results: [] });
         } else {
           resolve(response);

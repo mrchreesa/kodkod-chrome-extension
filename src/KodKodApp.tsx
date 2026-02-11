@@ -1,6 +1,7 @@
 
 import { useEffect, useState } from 'react';
 import { fetchProfiles, generateResume, fetchCredits, formAgentFill, formAgentLearn, formAgentAnswer, fillFormWithDebugger, detachDebugger, getCachedProfileContact, cacheProfileContact, type Profile, type ProfileContact, type CreditData, type FormLearning, type DebuggerFillField } from './lib/api';
+import { devLog, devWarn, devError, devGroup, devGroupEnd, devTable, devTimeStart, devTimeEnd, devGapReport, type FieldGapEntry, type FieldSource } from './lib/debug';
 import { Loader2, Sparkles, FileText, LogIn, Download, RefreshCw, Moon, Sun, Coins, X, ClipboardPen, CheckCircle2, RotateCcw, FileCheck, RotateCw, Eye, EyeOff, ExternalLink, Copy, Check } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Card } from './components/ui/Card';
@@ -48,7 +49,7 @@ export default function KodKodApp() {
   const [isApplicationPage, setIsApplicationPage] = useState(false);
   const [applicationPlatform, setApplicationPlatform] = useState<string | null>(null);
   const [autoFilling, setAutoFilling] = useState(false);
-  const [autoFillResult, setAutoFillResult] = useState<{ filled: number; failed: number; memoriesUsed?: number } | null>(null);
+  const [autoFillResult, setAutoFillResult] = useState<{ filled: number; failed: number; memoriesUsed?: number; globalUsed?: number } | null>(null);
   const [autoFillStep, setAutoFillStep] = useState<string>('');
   const [fieldsFilledCount, setFieldsFilledCount] = useState(0);
   
@@ -178,7 +179,7 @@ export default function KodKodApp() {
         if (session.generatedResumeId) setGeneratedResumeId(session.generatedResumeId);
         if (session.activeTab) setActiveTab(session.activeTab);
       } catch (e) {
-        console.log('Failed to restore session:', e);
+        devWarn('DETECT', 'Failed to restore session:', e);
       }
     }
     
@@ -219,7 +220,7 @@ export default function KodKodApp() {
         setApplicationPlatform(response.platform);
       }
     } catch (e) {
-      console.log('Could not check application page:', e);
+      devWarn('DETECT', 'Could not check application page:', e);
     }
   };
 
@@ -317,7 +318,7 @@ export default function KodKodApp() {
         setError('No content found. Please refresh the page and make sure it\'s fully loaded, then try again.');
       }
     } catch (e: any) {
-      console.error(e);
+      devError('SCRAPE', 'Scrape failed:', e);
       const errorMsg = e?.message || String(e);
       if (errorMsg.includes('connect') || errorMsg.includes('Receiving end does not exist')) {
         setError('Please refresh this page first, then click "Get from Page" again.');
@@ -454,6 +455,68 @@ export default function KodKodApp() {
     { pattern: /\b(city|location|address)\b/i, field: 'location' },
   ];
 
+  // Phone dialing code → country name (for intl-tel-input dropdowns)
+  const PHONE_PREFIX_TO_COUNTRY: Record<string, string> = {
+    '+1': 'United States', '+7': 'Russia', '+20': 'Egypt',
+    '+27': 'South Africa', '+30': 'Greece', '+31': 'Netherlands',
+    '+32': 'Belgium', '+33': 'France', '+34': 'Spain',
+    '+36': 'Hungary', '+39': 'Italy', '+40': 'Romania',
+    '+41': 'Switzerland', '+43': 'Austria', '+44': 'United Kingdom',
+    '+45': 'Denmark', '+46': 'Sweden', '+47': 'Norway',
+    '+48': 'Poland', '+49': 'Germany', '+51': 'Peru',
+    '+52': 'Mexico', '+53': 'Cuba', '+54': 'Argentina',
+    '+55': 'Brazil', '+56': 'Chile', '+57': 'Colombia',
+    '+60': 'Malaysia', '+61': 'Australia', '+62': 'Indonesia',
+    '+63': 'Philippines', '+64': 'New Zealand', '+65': 'Singapore',
+    '+66': 'Thailand', '+81': 'Japan', '+82': 'South Korea',
+    '+84': 'Vietnam', '+86': 'China', '+90': 'Turkey',
+    '+91': 'India', '+92': 'Pakistan', '+93': 'Afghanistan',
+    '+94': 'Sri Lanka', '+95': 'Myanmar', '+212': 'Morocco',
+    '+213': 'Algeria', '+216': 'Tunisia', '+218': 'Libya',
+    '+220': 'Gambia', '+221': 'Senegal', '+234': 'Nigeria',
+    '+254': 'Kenya', '+255': 'Tanzania', '+256': 'Uganda',
+    '+260': 'Zambia', '+263': 'Zimbabwe', '+351': 'Portugal',
+    '+352': 'Luxembourg', '+353': 'Ireland', '+354': 'Iceland',
+    '+358': 'Finland', '+370': 'Lithuania', '+371': 'Latvia',
+    '+372': 'Estonia', '+380': 'Ukraine', '+381': 'Serbia',
+    '+385': 'Croatia', '+386': 'Slovenia', '+420': 'Czech Republic',
+    '+421': 'Slovakia', '+852': 'Hong Kong', '+853': 'Macao',
+    '+880': 'Bangladesh', '+886': 'Taiwan', '+960': 'Maldives',
+    '+961': 'Lebanon', '+962': 'Jordan', '+963': 'Syria',
+    '+964': 'Iraq', '+965': 'Kuwait', '+966': 'Saudi Arabia',
+    '+968': 'Oman', '+971': 'United Arab Emirates', '+972': 'Israel',
+    '+974': 'Qatar', '+975': 'Bhutan', '+976': 'Mongolia',
+    '+977': 'Nepal', '+992': 'Tajikistan', '+993': 'Turkmenistan',
+    '+994': 'Azerbaijan', '+995': 'Georgia', '+998': 'Uzbekistan',
+  };
+
+  // Extract country name from a phone number's dialing code
+  function countryFromPhone(phone: string): string | null {
+    const cleaned = phone.replace(/[\s\-()]/g, '');
+    if (!cleaned.startsWith('+')) return null;
+    // Try longest prefix first (3 digits, then 2, then 1)
+    for (const len of [4, 3, 2]) {
+      const prefix = cleaned.slice(0, len);
+      if (PHONE_PREFIX_TO_COUNTRY[prefix]) return PHONE_PREFIX_TO_COUNTRY[prefix];
+    }
+    return null;
+  }
+
+  // Split a phone number like "+44 7511000245" into { code: "+44", local: "7511000245" }
+  function splitPhoneNumber(phone: string): { code: string; local: string } | null {
+    const cleaned = phone.replace(/[\s\-()]/g, '');
+    if (!cleaned.startsWith('+')) return null;
+    // Try longest prefix first (3-digit codes like +971, then 2-digit like +44, then 1-digit like +1)
+    for (const len of [4, 3, 2]) {
+      const prefix = cleaned.slice(0, len);
+      if (PHONE_PREFIX_TO_COUNTRY[prefix]) {
+        const local = cleaned.slice(len);
+        return { code: prefix, local };
+      }
+    }
+    return null;
+  }
+
   function applyHeuristics(
     fields: any[],
     contact: ProfileContact
@@ -461,8 +524,25 @@ export default function KodKodApp() {
     const heuristicValues: Record<string, string> = {};
     const remainingFields: any[] = [];
 
+    // Pre-scan: check if there are separate phone code / phone number / extension fields
+    const labels = fields.map((f: any) => ((f.label || '') + ' ' + (f.id || '')).toLowerCase());
+    const hasPhoneCodeField = labels.some(l => /phone.*code|country.*phone/i.test(l));
+
+    // Parse phone into parts if a country code field exists
+    const phoneParts = (hasPhoneCodeField && contact.phone) ? splitPhoneNumber(contact.phone) : null;
+
     for (const field of fields) {
-      // Only apply heuristics to simple text-like fields
+      // Detect intl-tel-input country code dropdown (iti-*__search-input pattern)
+      if (/^iti-\d+__/.test(field.id) && field.type === 'combobox' && contact.phone) {
+        const country = countryFromPhone(contact.phone);
+        if (country) {
+          heuristicValues[field.id] = country;
+          devLog('HEURISTIC', `Matched intl-tel-input "${field.id}" → phone country = "${country}"`);
+          continue;
+        }
+      }
+
+      // Only apply text heuristics to simple text-like fields
       if (!['text', 'email', 'tel', 'url'].includes(field.type)) {
         remainingFields.push(field);
         continue;
@@ -470,22 +550,48 @@ export default function KodKodApp() {
 
       let matched = false;
       const label = (field.label || '').toLowerCase();
+      const fieldId = (field.id || '').toLowerCase();
 
-      for (const { pattern, field: contactField, split } of heuristicPatterns) {
-        if (pattern.test(label)) {
-          let value = contact[contactField] || '';
-          if (!value) break;
+      // Smart phone field splitting: when separate code/number/extension fields exist
+      if (phoneParts && contact.phone) {
+        // Country phone code field → just the dialing code
+        if (/phone.*code|country.*phone/i.test(label) || /countryPhoneCode/i.test(fieldId)) {
+          heuristicValues[field.id] = phoneParts.code;
+          matched = true;
+          devLog('HEURISTIC', `Matched "${field.label}" → phone.code = "${phoneParts.code}"`);
+        }
+        // Extension field → leave empty (skip it)
+        else if (/extension/i.test(label) || /extension/i.test(fieldId)) {
+          // Don't match — extension is for office extensions, not part of mobile number
+          remainingFields.push(field);
+          continue;
+        }
+        // Phone number field (not code, not extension) → local number only
+        else if (/\b(phone|mobile|telephone|cell)\b/i.test(label)) {
+          heuristicValues[field.id] = phoneParts.local;
+          matched = true;
+          devLog('HEURISTIC', `Matched "${field.label}" → phone.local = "${phoneParts.local}"`);
+        }
+      }
 
-          if (split && contactField === 'full_name') {
-            const parts = value.split(/\s+/);
-            if (split === 'first') value = parts[0] || '';
-            else value = parts.slice(1).join(' ') || '';
-          }
+      if (!matched) {
+        for (const { pattern, field: contactField, split } of heuristicPatterns) {
+          if (pattern.test(label)) {
+            let value = contact[contactField] || '';
+            if (!value) break;
 
-          if (value) {
-            heuristicValues[field.id] = value;
-            matched = true;
-            break;
+            if (split && contactField === 'full_name') {
+              const parts = value.split(/\s+/);
+              if (split === 'first') value = parts[0] || '';
+              else value = parts.slice(1).join(' ') || '';
+            }
+
+            if (value) {
+              heuristicValues[field.id] = value;
+              matched = true;
+              devLog('HEURISTIC', `Matched "${field.label}" → ${contactField}${split ? `.${split}` : ''} = "${value}"`);
+              break;
+            }
           }
         }
       }
@@ -513,10 +619,13 @@ export default function KodKodApp() {
     }
 
     try {
+      devTimeStart('pipeline_total');
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab.id || !tab.url) throw new Error('No active tab');
 
+      devTimeStart('pipeline_scrape');
       const scrapeResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrapeFormFields' });
+      devTimeEnd('SCRAPE', 'pipeline_scrape');
       if (!scrapeResponse?.fields || scrapeResponse.fields.length === 0) {
         throw new Error('No form fields found on this page');
       }
@@ -532,7 +641,7 @@ export default function KodKodApp() {
         const result = applyHeuristics(scrapeResponse.fields, contact);
         heuristicValues = result.heuristicValues;
         fieldsForAI = result.remainingFields;
-        console.log(`KodKod: Heuristic matched ${Object.keys(heuristicValues).length} fields, ${fieldsForAI.length} remaining for AI`);
+        devLog('HEURISTIC', `Matched ${Object.keys(heuristicValues).length} fields, ${fieldsForAI.length} remaining for AI`);
       }
 
       // Separate fields into regular, custom-dropdown, and debugger-needing
@@ -540,11 +649,17 @@ export default function KodKodApp() {
       const customDropdownFields = scrapeResponse.fields.filter((f: any) => f.type === 'custom-dropdown');
       const debuggerFields = scrapeResponse.fields.filter((f: any) => f.needsDebugger);
 
-      console.log(`KodKod: ${regularFields.length} regular, ${customDropdownFields.length} custom dropdown, ${debuggerFields.length} debugger fields`);
+      devLog('CLASSIFY', `${regularFields.length} regular, ${customDropdownFields.length} custom dropdown, ${debuggerFields.length} debugger`);
+      devGroup('CLASSIFY', 'Field classification');
+      devLog('CLASSIFY', `Regular: ${regularFields.map((f: any) => f.id).join(', ')}`);
+      devLog('CLASSIFY', `Custom dropdown: ${customDropdownFields.map((f: any) => f.id).join(', ')}`);
+      devLog('CLASSIFY', `Debugger: ${debuggerFields.map((f: any) => f.id).join(', ')}`);
+      devGroupEnd();
 
       setAutoFillStep(autoFillSteps[1]);
 
       // Only send remaining fields (not heuristic-matched) to AI
+      devTimeStart('pipeline_ai');
       const fillResponse = await formAgentFill({
         fields: fieldsForAI,
         masterProfileId: profiles[0].id,
@@ -553,10 +668,43 @@ export default function KodKodApp() {
         jobUrl: tab.url,
         jobDescription: jobDescription || undefined,
         companyName: companyName || applicationPlatform || undefined,
+        platform: applicationPlatform || undefined,
       });
+
+      devTimeEnd('AI_CALL', 'pipeline_ai');
 
       // Merge heuristic values with AI values (AI takes precedence for any overlap)
       fillResponse.values = { ...heuristicValues, ...fillResponse.values };
+
+      // Log AI response details
+      devGroup('AI_CALL', `AI response: ${fillResponse.fieldsFilled}/${fillResponse.fieldsProvided} fields, ${fillResponse.memoriesUsed} from memory`);
+      devTable(Object.entries(fillResponse.values).map(([id, val]) => ({
+        fieldId: id,
+        value: String(val).slice(0, 40),
+        source: fillResponse.sources?.[id] || (heuristicValues[id] ? 'heuristic' : 'unknown'),
+      })));
+      devGroupEnd();
+
+      // Gap report: map every scraped field to its resolution source
+      const gapEntries: FieldGapEntry[] = scrapeResponse.fields.map((field: any) => {
+        let source: FieldSource = 'none';
+        if (heuristicValues[field.id]) {
+          source = 'heuristic';
+        } else if (fillResponse.sources?.[field.id]) {
+          source = fillResponse.sources[field.id] as FieldSource;
+        } else if (fillResponse.values[field.id]) {
+          source = 'ai';
+        }
+        return {
+          fieldId: field.id,
+          label: field.label,
+          type: field.type,
+          source,
+          options: field.options,
+          platform: applicationPlatform || undefined,
+        };
+      });
+      devGapReport(gapEntries, applicationPlatform || undefined);
 
       if (!fillResponse.success) {
         throw new Error('Failed to generate form values');
@@ -583,6 +731,7 @@ export default function KodKodApp() {
       let totalFailed = 0;
 
       // Step 1: Fill regular fields with content script (text inputs, radio buttons)
+      devTimeStart('pipeline_fill_regular');
       if (regularFields.length > 0) {
         const regularValues: Record<string, string> = {};
         regularFields.forEach((field: any) => {
@@ -596,12 +745,18 @@ export default function KodKodApp() {
           values: regularValues,
           fields: regularFields,
         });
-        
-        totalFilled += fillResult.filled || 0;
-        totalFailed += fillResult.failed || 0;
+
+        if (fillResult) {
+          totalFilled += fillResult.filled || 0;
+          totalFailed += fillResult.failed || 0;
+        } else {
+          devWarn('FILL_REGULAR', 'No response from fillForm (content script may not have responded)');
+        }
       }
+      devTimeEnd('FILL_REGULAR', 'pipeline_fill_regular');
 
       // Step 2: Fill custom dropdowns via click simulation (React Select, MUI, Ant Design)
+      devTimeStart('pipeline_fill_custom');
       const debuggerFallbackFields: any[] = [];
       if (customDropdownFields.length > 0) {
         const customFields = customDropdownFields.filter((f: any) => fillResponse.values[f.id]);
@@ -609,23 +764,32 @@ export default function KodKodApp() {
         customFields.forEach((f: any) => { customValues[f.id] = fillResponse.values[f.id]; });
 
         if (customFields.length > 0) {
-          console.log(`KodKod: Filling ${customFields.length} custom dropdowns via click simulation`);
+          devLog('FILL_CUSTOM', `Filling ${customFields.length} custom dropdowns via click simulation`);
           const customResult = await chrome.tabs.sendMessage(tab.id, {
             action: 'fillCustomDropdowns',
             fields: customFields,
             values: customValues,
           });
 
-          totalFilled += customResult.filled || 0;
-          // Fields that failed click simulation fall back to debugger
-          if (customResult.failedFields?.length > 0) {
-            const failedCustomFields = customFields.filter((f: any) => customResult.failedFields.includes(f.id));
-            debuggerFallbackFields.push(...failedCustomFields);
+          if (customResult) {
+            totalFilled += customResult.filled || 0;
+            // Fields that failed click simulation fall back to debugger
+            if (customResult.failedFields?.length > 0) {
+              const failedCustomFields = customFields.filter((f: any) => customResult.failedFields.includes(f.id));
+              debuggerFallbackFields.push(...failedCustomFields);
+            }
+          } else {
+            devWarn('FILL_CUSTOM', 'No response from fillCustomDropdowns (content script may not have responded)');
+            // Treat all as failed — fall back to debugger
+            debuggerFallbackFields.push(...customFields);
           }
         }
       }
 
+      devTimeEnd('FILL_CUSTOM', 'pipeline_fill_custom');
+
       // Step 3: Fill dropdown fields with Chrome Debugger API (ARIA comboboxes + failed custom dropdowns)
+      devTimeStart('pipeline_fill_debugger');
       const allDebuggerFields = [...debuggerFields, ...debuggerFallbackFields];
       if (allDebuggerFields.length > 0) {
         const debuggerFillFields: DebuggerFillField[] = allDebuggerFields
@@ -637,23 +801,28 @@ export default function KodKodApp() {
           }));
         
         if (debuggerFillFields.length > 0) {
-          console.log(`KodKod: Filling ${debuggerFillFields.length} dropdowns with debugger API`);
+          devLog('FILL_DEBUGGER', `Filling ${debuggerFillFields.length} dropdowns with debugger API`);
           
           const debuggerResult = await fillFormWithDebugger(tab.id, debuggerFillFields);
           totalFilled += debuggerResult.filled;
           totalFailed += debuggerResult.failed;
           
-          console.log('KodKod: Debugger fill results:', debuggerResult.results);
+          devLog('FILL_DEBUGGER', 'Debugger fill results:');
+          devTable(debuggerResult.results);
           
           // Detach debugger after filling
           await detachDebugger(tab.id);
         }
       }
 
+      devTimeEnd('FILL_DEBUGGER', 'pipeline_fill_debugger');
+      devTimeEnd('FILL_REGULAR', 'pipeline_total');
+
       setAutoFillResult({
         filled: totalFilled,
         failed: totalFailed,
         memoriesUsed: fillResponse.memoriesUsed,
+        globalUsed: fillResponse.globalUsed,
       });
       setFieldsFilledCount(prev => prev + totalFilled);
 
@@ -732,20 +901,31 @@ export default function KodKodApp() {
         }
       }
 
+      devGroup('LEARN', `${learnings.length} learnings`);
+      devTable(learnings.map(l => ({
+        question: l.questionText.slice(0, 40),
+        type: l.type,
+        agentValue: (l.agentValue || '-').slice(0, 25),
+        finalValue: l.finalValue.slice(0, 25),
+      })));
+      devGroupEnd();
+
       if (learnings.length > 0) {
         const result = await formAgentLearn({
           learnings,
           sessionId: formSessionId || undefined,
         });
+        devLog('LEARN', `Result: ${result.learned} learned, ${result.reinforced} reinforced, ${result.corrected} corrected`);
         setLearnResult(result);
       } else {
+        devLog('LEARN', 'No changes detected');
         setLearnResult({ learned: 0, reinforced: 0, corrected: 0 });
       }
       
       setShowLearnPrompt(false);
       
     } catch (err: any) {
-      console.error('Learning failed:', err);
+      devError('LEARN', 'Learning failed:', err);
       const errorMsg = err?.message || String(err);
       if (errorMsg.includes('connect') || errorMsg.includes('Receiving end does not exist')) {
         setError('Please refresh this page first, then try saving again.');
@@ -770,6 +950,9 @@ export default function KodKodApp() {
         masterProfileId: profiles[0].id,
         turnstileToken,
         saveToMemory: false, // Don't auto-save - user will save after editing
+        jobDescription: jobDescription || undefined,
+        companyName: companyName || undefined,
+        jobTitle: jobTitle || undefined,
       });
       
       setManualAnswer(result.answer);
@@ -835,7 +1018,7 @@ export default function KodKodApp() {
         setRefreshError('Could not find matching field on page');
       }
     } catch (err: any) {
-      console.error('Refresh from form failed:', err);
+      devError('DETECT', 'Refresh from form failed:', err);
       // Check for connection errors (content script not loaded)
       const errorMsg = err?.message || String(err);
       if (errorMsg.includes('connect') || errorMsg.includes('Receiving end does not exist')) {
@@ -1334,14 +1517,18 @@ export default function KodKodApp() {
                   <CheckCircle2 className="h-4 w-4" />
                   <span>
                     Filled {autoFillResult.filled} field{autoFillResult.filled !== 1 ? 's' : ''}
-                    {autoFillResult.memoriesUsed ? ` (${autoFillResult.memoriesUsed} from memory)` : ''}
+                    {(autoFillResult.memoriesUsed || autoFillResult.globalUsed) ? ` (${[
+                      autoFillResult.memoriesUsed ? `${autoFillResult.memoriesUsed} from memory` : '',
+                      autoFillResult.globalUsed ? `${autoFillResult.globalUsed} from knowledge base` : '',
+                    ].filter(Boolean).join(', ')})` : ''}
                     {autoFillResult.failed > 0 && ` · ${autoFillResult.failed} failed`}
                   </span>
                   <button onClick={() => { setAutoFillResult(null); setShowLearnPrompt(false); }} className="ml-auto hover:text-green-700 dark:hover:text-green-300">
                     <X className="h-4 w-4" />
                   </button>
                 </div>
-                
+                <p className="mt-1.5 text-[10px] text-muted-foreground">Please review all fields manually before submitting. <br /> AI-generated answers may contain errors.</p>
+
                 {showLearnPrompt && (
                   <div className="mt-3 pt-3 border-t border-green-500/20">
                     <p className="text-xs text-muted-foreground mb-2">Review and edit, then save so I can learn.</p>
