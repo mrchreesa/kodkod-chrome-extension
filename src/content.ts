@@ -1422,6 +1422,8 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (request.action === 'fillForm') {
+      // Only respond from the frame that has form fields (avoid iframe race condition)
+      if (!hasFormFields()) return false;
       if (request.values) {
         fillFormFields(request.values, request.fields).then(result => sendResponse(result));
         return true; // Keep channel open for async response
@@ -1432,6 +1434,8 @@ chrome.runtime.onMessage.addListener(
 
     // Fill custom dropdowns via click simulation (React Select, MUI, Ant Design)
     if (request.action === 'fillCustomDropdowns') {
+      // Only respond from the frame that has form fields
+      if (!hasFormFields()) return false;
       if (request.fields && request.values) {
         (async () => {
           let filled = 0;
@@ -1457,6 +1461,7 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (request.action === 'captureFormValues') {
+      if (!hasFormFields()) return false;
       const values = captureFormValues();
       sendResponse({ values });
     }
