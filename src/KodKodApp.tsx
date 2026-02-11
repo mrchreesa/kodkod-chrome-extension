@@ -307,9 +307,12 @@ export default function KodKodApp() {
         if (response.source && response.source !== 'generic') {
           setScrapeSource(response.source);
         }
-        
-        // Try to extract company name from content
-        // This is a simple heuristic - the API will do better extraction
+
+        // Set session name from tab title if we don't have one yet
+        if (!companyName && !jobTitle) {
+          const name = await extractSessionName();
+          if (name) setCompanyName(name);
+        }
       } else {
         setError('No content found. Please refresh the page and make sure it\'s fully loaded, then try again.');
       }
@@ -334,11 +337,57 @@ export default function KodKodApp() {
     'Formatting resume...',
   ];
 
+  // Extract a session name from the active tab for the header indicator
+  const extractSessionName = async (): Promise<string | null> => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.title) return null;
+      const title = tab.title;
+
+      // Try to extract company/job from common tab title patterns
+      // "Job Title at Company | Platform" or "Company - Job Title" etc.
+      const atMatch = title.match(/^(.+?)\s+at\s+(.+?)(?:\s*[|\-–—]|$)/i);
+      if (atMatch) {
+        setJobTitle(prev => prev || atMatch[1].trim());
+        return atMatch[2].trim();
+      }
+
+      const dashMatch = title.match(/^(.+?)\s*[|\-–—]\s*(.+?)(?:\s*[|\-–—]|$)/);
+      if (dashMatch) {
+        // If the second part looks like a platform name, use the first part
+        const platforms = ['greenhouse', 'lever', 'workday', 'indeed', 'linkedin', 'glassdoor', 'smartrecruiters', 'ashby', 'apply'];
+        const secondLower = dashMatch[2].toLowerCase();
+        if (platforms.some(p => secondLower.includes(p))) {
+          return dashMatch[1].trim();
+        }
+        return dashMatch[1].trim();
+      }
+
+      // Fallback: use the hostname
+      if (tab.url) {
+        try {
+          const hostname = new URL(tab.url).hostname.replace(/^www\./, '').replace(/\.(com|io|co|org|net)$/, '');
+          return hostname.charAt(0).toUpperCase() + hostname.slice(1);
+        } catch { /* ignore */ }
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
   const handleGenerate = async () => {
     if (profiles.length === 0 || !jobDescription || !turnstileToken) return;
     setGenerating(true);
     setError(null);
     setGenerationStep(generationSteps[0]);
+
+    // Set session name early so the header shows context immediately
+    if (!companyName && !jobTitle) {
+      const name = await extractSessionName();
+      if (name) setCompanyName(name);
+    }
 
     let stepIndex = 0;
     const stepInterval = setInterval(() => {
@@ -449,13 +498,19 @@ export default function KodKodApp() {
 
   const handleAutoFill = async () => {
     if (profiles.length === 0 || !turnstileToken) return;
-    
+
     setAutoFilling(true);
     setError(null);
     setAutoFillResult(null);
     setAutoFillStep(autoFillSteps[0]);
     setShowLearnPrompt(false);
     setLearnResult(null);
+
+    // Set session name early so the header shows context immediately
+    if (!companyName && !jobTitle) {
+      const name = await extractSessionName();
+      if (name) setCompanyName(name);
+    }
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1034,6 +1089,16 @@ export default function KodKodApp() {
               <span className="truncate flex-1">
                 {companyName && jobTitle ? `${companyName} - ${jobTitle}` : companyName || jobTitle}
               </span>
+            </>
+          ) : (generating || autoFilling) ? (
+            <>
+              <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin" />
+              <span className="flex-1">{applicationPlatform || 'Processing...'}</span>
+            </>
+          ) : jobDescription ? (
+            <>
+              <FileText className="h-3 w-3 flex-shrink-0" />
+              <span className="flex-1 text-muted-foreground/70">Application in progress</span>
             </>
           ) : (
             <span className="flex-1 text-muted-foreground/70">No application started</span>
