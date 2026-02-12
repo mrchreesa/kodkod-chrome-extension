@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KodKod Companion",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Generate resumes and cover letters directly from job boards.",
   "permissions": ["sidePanel", "activeTab", "tabs", "debugger"],
   "host_permissions": ["*://*.kodkodai.com/*", "*://localhost/*"],
