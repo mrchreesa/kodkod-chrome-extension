@@ -1,5 +1,7 @@
 /// <reference types="chrome" />
-console.log('KodKod Content Script loaded')
+import { devLog, devWarn, devError, devGroup, devGroupEnd, devTable, devTimeStart, devTimeEnd, devFieldSummary, type FieldFillLog } from './lib/debug';
+
+devLog('DETECT', 'Content script loaded');
 
 // Job board configurations with specific selectors
 interface JobBoardConfig {
@@ -163,7 +165,7 @@ function detectJobBoard(): JobBoardConfig | null {
   for (const config of jobBoardConfigs) {
     for (const pattern of config.hostPatterns) {
       if (pattern.test(hostname)) {
-        console.log(`KodKod: Detected ${config.name}`);
+        devLog('DETECT', `Detected job board: ${config.name}`);
         return config;
       }
     }
@@ -295,7 +297,7 @@ function scrapeJobDescription(): { content: string; source: string } {
       return { content: cleanText(content), source: jobBoard.name };
     }
 
-    console.log(`KodKod: ${jobBoard.name} selectors didn't match, falling back to generic`);
+    devWarn('SCRAPE', `${jobBoard.name} selectors didn't match, falling back to generic`);
   }
 
   return { content: cleanText(genericScrape()), source: 'generic' };
@@ -371,7 +373,7 @@ function detectApplicationPlatform(): ApplicationPlatformConfig | null {
 
     const urlMatch = platform.applicationUrlPatterns.some(pattern => pattern.test(url));
     if (urlMatch) {
-      console.log(`KodKod: Detected application form on ${platform.name}`);
+      devLog('DETECT', `Detected application form: ${platform.name}`);
       return platform;
     }
   }
@@ -410,9 +412,22 @@ function getLabelForInput(input: HTMLElement): string {
     }
   }
 
-  // 2. Check for aria-label
+  // 1b. Workday: check [data-automation-id="formField"] ancestor for <label>
+  const workdayField = input.closest('[data-automation-id="formField"]');
+  if (workdayField) {
+    const wdLabel = workdayField.querySelector('label');
+    if (wdLabel && wdLabel.textContent) {
+      return wdLabel.textContent.trim();
+    }
+  }
+
+  // 2. Check for aria-label (skip placeholder-like values)
   const ariaLabel = input.getAttribute('aria-label');
-  if (ariaLabel) return ariaLabel.trim();
+  if (ariaLabel) {
+    const lower = ariaLabel.toLowerCase().trim();
+    const isPlaceholder = /^(select\b|choose\b|pick\b|search\b|type to\b)/.test(lower);
+    if (!isPlaceholder) return ariaLabel.trim();
+  }
 
   // 3. Check for aria-labelledby
   const ariaLabelledBy = input.getAttribute('aria-labelledby');
@@ -420,6 +435,18 @@ function getLabelForInput(input: HTMLElement): string {
     const labelEl = document.getElementById(ariaLabelledBy);
     if (labelEl && labelEl.textContent) {
       return labelEl.textContent.trim();
+    }
+  }
+
+  // 3b. Check for aria-describedby (use as label if short, no periods)
+  const ariaDescribedBy = input.getAttribute('aria-describedby');
+  if (ariaDescribedBy) {
+    const descEl = document.getElementById(ariaDescribedBy);
+    if (descEl && descEl.textContent) {
+      const descText = descEl.textContent.trim();
+      if (descText.length < 100 && !descText.includes('.')) {
+        return descText;
+      }
     }
   }
 
@@ -448,6 +475,15 @@ function getLabelForInput(input: HTMLElement): string {
     const label = container.querySelector('label, .label, [class*="label"]');
     if (label && label.textContent) {
       return label.textContent.trim();
+    }
+  }
+
+  // 6b. Check nearby heading in fieldset, role="group", or section parent
+  const groupParent = input.closest('fieldset, [role="group"], section');
+  if (groupParent) {
+    const heading = groupParent.querySelector('h1, h2, h3, h4, h5, h6, legend');
+    if (heading && heading.textContent) {
+      return heading.textContent.trim();
     }
   }
 
@@ -558,14 +594,151 @@ function findComboboxButton(combobox: HTMLElement): HTMLElement | null {
 }
 
 // ============================================
-// FUZZY MATCHING UTILITY
+// FUZZY MATCHING UTILITY (Enhanced)
 // ============================================
+
+// Country aliases for matching
+const COUNTRY_ALIASES: Record<string, string[]> = {
+  'united states': ['us', 'usa', 'united states of america', 'u.s.', 'u.s.a.'],
+  'united kingdom': ['uk', 'great britain', 'england', 'u.k.'],
+  'south korea': ['korea, republic of', 'republic of korea'],
+  'czech republic': ['czechia'],
+};
+
+// Build reverse lookup
+const _countryCanonical = new Map<string, string>();
+for (const [canon, aliases] of Object.entries(COUNTRY_ALIASES)) {
+  _countryCanonical.set(canon, canon);
+  for (const a of aliases) _countryCanonical.set(a, canon);
+}
+
+function normalizeCountry(text: string): string {
+  return _countryCanonical.get(text.toLowerCase().trim()) || text.toLowerCase().trim();
+}
+
+// Degree aliases for matching
+const DEGREE_ALIASES: Record<string, string[]> = {
+  "bachelor's degree": [
+    'bsc', 'bsc(hons)', 'bs', 'b.s.', 'b.sc.', 'ba', 'b.a.',
+    'bachelor of science', 'bachelor of arts', 'bachelor of engineering',
+    'bachelor of technology', 'beng', 'b.eng.', 'btech', 'b.tech.',
+    'bachelor of commerce', 'bcom', 'b.com.', 'bachelor of business',
+    'bba', 'b.b.a.', 'bachelor', 'bachelors', "bachelor's",
+    'bachelor of fine arts', 'bfa', 'b.f.a.',
+    'bachelor of education', 'bed', 'b.ed.',
+    'bachelor of laws', 'llb', 'l.l.b.',
+  ],
+  "master's degree": [
+    'msc', 'msc(hons)', 'ms', 'm.s.', 'm.sc.', 'ma', 'm.a.',
+    'master of science', 'master of arts', 'master of engineering',
+    'meng', 'm.eng.', 'mtech', 'm.tech.',
+    'master of business administration', 'mba', 'm.b.a.',
+    'master of commerce', 'mcom', 'm.com.',
+    'master of fine arts', 'mfa', 'm.f.a.',
+    'master of education', 'med', 'm.ed.',
+    'master of laws', 'llm', 'l.l.m.',
+    'master', 'masters', "master's",
+    'master of public health', 'mph',
+    'master of public administration', 'mpa',
+  ],
+  'doctoral degree': [
+    'phd', 'ph.d.', 'ph.d', 'doctorate', 'doctor of philosophy',
+    'dphil', 'd.phil.', 'edd', 'ed.d.', 'doctor of education',
+    'md', 'm.d.', 'doctor of medicine',
+    'jd', 'j.d.', 'juris doctor',
+  ],
+  'associate degree': [
+    'associate', 'associates', "associate's",
+    'associate of arts', 'aa', 'a.a.',
+    'associate of science', 'as', 'a.s.',
+    'associate of applied science', 'aas',
+  ],
+  'high school diploma': [
+    'high school', 'secondary school', 'gcse', 'a-levels', 'a levels',
+    'ged', 'diploma', 'secondary education',
+  ],
+};
+
+const _degreeCanonical = new Map<string, string>();
+for (const [canon, aliases] of Object.entries(DEGREE_ALIASES)) {
+  _degreeCanonical.set(canon, canon);
+  for (const a of aliases) _degreeCanonical.set(a, canon);
+}
+
+function normalizeDegree(text: string): string | null {
+  const lower = text.toLowerCase().trim().replace(/[()]/g, '');
+  return _degreeCanonical.get(lower) || null;
+}
+
+// Yes/No normalization sets
+const YES_VARIANTS = new Set(['yes', 'y', 'true', '1', 'on']);
+const NO_VARIANTS = new Set(['no', 'n', 'false', '0', 'off']);
+
+// Decline-to-answer normalization
+const DECLINE_VARIANTS = [
+  'prefer not to say', 'prefer not to disclose', 'decline to answer',
+  'decline to self-identify', 'decline to state', 'i do not wish to provide',
+  'choose not to disclose', 'do not wish to answer',
+];
+
+function normalizeDecline(text: string): string | null {
+  const lower = text.toLowerCase().trim();
+  for (const v of DECLINE_VARIANTS) {
+    if (lower.includes(v) || v.includes(lower)) return 'DECLINE';
+  }
+  return null;
+}
+
+// Levenshtein distance for short strings
+function levenshteinRatio(a: string, b: string): number {
+  if (a.length > 50 || b.length > 50) return 0;
+  const la = a.length, lb = b.length;
+  if (la === 0) return lb === 0 ? 1 : 0;
+  if (lb === 0) return 0;
+
+  const d: number[][] = Array.from({ length: la + 1 }, () => new Array(lb + 1).fill(0));
+  for (let i = 0; i <= la; i++) d[i][0] = i;
+  for (let j = 0; j <= lb; j++) d[0][j] = j;
+
+  for (let i = 1; i <= la; i++) {
+    for (let j = 1; j <= lb; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+    }
+  }
+
+  return 1 - d[la][lb] / Math.max(la, lb);
+}
 
 function fuzzyMatch(target: string, candidate: string): number {
   const t = target.toLowerCase().trim();
   const c = candidate.toLowerCase().trim();
   if (t === c) return 1.0;
+
+  // Country alias match
+  if (normalizeCountry(t) === normalizeCountry(c)) return 1.0;
+
+  // Degree alias match
+  const degT = normalizeDegree(t);
+  const degC = normalizeDegree(c);
+  if (degT && degC && degT === degC) return 1.0;
+  // Also match if one side is canonical and the other normalizes to it
+  if (degT && degT === c) return 1.0;
+  if (degC && degC === t) return 1.0;
+
+  // Yes/No normalization
+  if ((YES_VARIANTS.has(t) && YES_VARIANTS.has(c)) || (NO_VARIANTS.has(t) && NO_VARIANTS.has(c))) return 1.0;
+
+  // Decline-to-answer normalization
+  if (normalizeDecline(t) && normalizeDecline(c)) return 0.95;
+
+  // Exact contains
   if (c.includes(t) || t.includes(c)) return 0.8;
+
+  // Levenshtein for short strings
+  const lev = levenshteinRatio(t, c);
+  if (lev >= 0.85) return lev;
+
   // Word overlap ratio
   const tWords = t.split(/\s+/);
   const cWords = c.split(/\s+/);
@@ -578,13 +751,36 @@ function findBestOption(
   value: string,
   threshold = 0.5
 ): { element?: HTMLElement; text: string; score: number } | null {
-  let best: { element?: HTMLElement; text: string; score: number } | null = null;
+  // Adaptive threshold: lower for small option sets
+  const effectiveThreshold = options.length <= 3 ? Math.min(threshold, 0.3) : threshold;
+
+  const scored: { element?: HTMLElement; text: string; score: number }[] = [];
   for (const opt of options) {
     const score = fuzzyMatch(value, opt.text);
-    if (score >= threshold && (!best || score > best.score)) {
-      best = { ...opt, score };
-    }
+    scored.push({ ...opt, score });
   }
+
+  // Log all scores in dev mode
+  devGroup('MATCH', `findBestOption("${value.slice(0, 30)}") — ${options.length} candidates`);
+  devTable(
+    scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10)
+      .map(s => ({ option: s.text.slice(0, 40), score: s.score.toFixed(3) }))
+  );
+
+  const best = scored.reduce<{ element?: HTMLElement; text: string; score: number } | null>(
+    (acc, cur) => (cur.score >= effectiveThreshold && (!acc || cur.score > acc.score) ? cur : acc),
+    null,
+  );
+
+  if (best) {
+    devLog('MATCH', `Best match: "${best.text}" (score=${best.score.toFixed(3)})`);
+  } else {
+    devWarn('MATCH', `No match above threshold ${effectiveThreshold} for "${value.slice(0, 30)}"`);
+  }
+  devGroupEnd();
+
   return best;
 }
 
@@ -597,6 +793,7 @@ function wait(ms: number): Promise<void> {
 }
 
 async function fillCustomDropdown(field: FormField, value: string): Promise<boolean> {
+  devTimeStart(`fillCustomDropdown_${field.id}`);
   // Find the trigger element
   const triggerSelectors: Record<string, string> = {
     'react-select': '[class*="react-select"] [class*="-control"]',
@@ -611,7 +808,12 @@ async function fillCustomDropdown(field: FormField, value: string): Promise<bool
   if (!trigger && field.dropdownLib && triggerSelectors[field.dropdownLib]) {
     trigger = document.querySelector(triggerSelectors[field.dropdownLib]) as HTMLElement;
   }
-  if (!trigger) return false;
+  if (!trigger) {
+    devWarn('FILL_CUSTOM', `Trigger not found for "${field.label}" (${field.dropdownLib})`);
+    devTimeEnd('FILL_CUSTOM', `fillCustomDropdown_${field.id}`);
+    return false;
+  }
+  devLog('FILL_CUSTOM', `Trigger found for "${field.label}" via ${field.selector ? 'selector' : 'lib-default'}`);
 
   try {
     // Open dropdown: use mousedown for React Select (it listens to mousedown, not click)
@@ -667,15 +869,20 @@ async function fillCustomDropdown(field: FormField, value: string): Promise<bool
     if (match?.element) {
       match.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       match.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      devLog('FILL_CUSTOM', `Clicked option "${match.text}" (score=${match.score.toFixed(3)}) for "${field.label}"`);
+      devTimeEnd('FILL_CUSTOM', `fillCustomDropdown_${field.id}`);
       return true;
     }
 
     // No match found, close dropdown
     document.body.click();
+    devWarn('FILL_CUSTOM', `No matching option for "${field.label}" value="${value}"`);
+    devTimeEnd('FILL_CUSTOM', `fillCustomDropdown_${field.id}`);
     return false;
   } catch (err) {
-    console.error('KodKod: Error filling custom dropdown:', err);
+    devError('FILL_CUSTOM', `Error filling "${field.label}":`, err);
     document.body.click();
+    devTimeEnd('FILL_CUSTOM', `fillCustomDropdown_${field.id}`);
     return false;
   }
 }
@@ -688,6 +895,7 @@ const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
 
 // Scrape all form fields from the page (TEXT + RADIO + COMBOBOX)
 function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
+  devTimeStart('scrapeFormFields');
   const platform = detectApplicationPlatform();
   const fields: FormField[] = [];
   const processedNames = new Set<string>();
@@ -732,7 +940,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
     };
     
     fields.push(field);
-    console.log(`KodKod: Found combobox "${label}" with ${options.length} options`);
+    devLog('SCRAPE', `Pass 1 combobox: "${label}" [${options.length} opts] ${generateSelector(el)}`);
   });
 
   // PASS 1.5: Detect custom dropdowns (React Select, MUI, Ant Design, generic ARIA)
@@ -772,19 +980,24 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       const valueEl = el.querySelector('[class*="-singleValue"], [class*="-placeholder"], .MuiSelect-nativeInput, .ant-select-selection-item');
       const currentValue = valueEl?.textContent?.trim() || '';
 
+      // generic-aria dropdowns (e.g. Workday) need the Chrome Debugger API
+      // because synthetic DOM events have isTrusted=false and are ignored.
+      // React Select / MUI / Ant Design work with click simulation.
+      const useDebugger = lib === 'generic-aria';
+
       fields.push({
         id: fieldId,
         name: el.getAttribute('name') || '',
         label,
-        type: 'custom-dropdown',
+        type: useDebugger ? 'combobox' : 'custom-dropdown',
         required: el.getAttribute('aria-required') === 'true',
         currentValue: currentValue || undefined,
         selector: generateSelector(el),
-        needsDebugger: false, // We'll handle via click simulation
+        needsDebugger: useDebugger,
         dropdownLib: lib,
       });
 
-      console.log(`KodKod: Found custom dropdown "${label}" (${lib})`);
+      devLog('SCRAPE', `Pass 1.5 ${useDebugger ? 'debugger-dropdown' : 'custom-dropdown'}: "${label}" (${lib}) ${generateSelector(el)}`);
     });
   }
 
@@ -831,7 +1044,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       needsDebugger: false,
     });
 
-    console.log(`KodKod: Found ARIA radiogroup "${label}" with ${options.length} options`);
+    devLog('SCRAPE', `Pass 1.6 ARIA radiogroup: "${label}" [${options.length} opts] ${generateSelector(el)}`);
   });
 
   // [role="switch"] elements (toggle switches)
@@ -859,7 +1072,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       needsDebugger: false,
     });
 
-    console.log(`KodKod: Found switch "${label}" (${isChecked ? 'on' : 'off'})`);
+    devLog('SCRAPE', `Pass 1.6 switch: "${label}" (${isChecked ? 'on' : 'off'}) ${generateSelector(el)}`);
   });
 
   // PASS 2: Find native <select> elements
@@ -906,7 +1119,7 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
       needsDebugger: false,
     });
 
-    console.log(`KodKod: Found native <select> "${label}" with ${options.length} options`);
+    devLog('SCRAPE', `Pass 2 <select>: "${label}" [${options.length} opts] ${generateSelector(el)}`);
   });
 
   // PASS 3: Find text inputs, textareas, radio buttons, and checkboxes (skip those inside comboboxes)
@@ -963,12 +1176,21 @@ function scrapeFormFields(): { fields: FormField[]; platform: string | null } {
     fields.push(field);
   });
 
-  console.log(`KodKod: Scraped ${fields.length} form fields (text + radio + checkbox + select + combobox)`);
+  devLog('SCRAPE', `Scraped ${fields.length} fields`);
+  devGroup('SCRAPE', `All scraped fields (${fields.length})`);
+  devTable(fields.map(f => ({
+    id: f.id, label: (f.label || '').slice(0, 40), type: f.type,
+    options: f.options?.length ?? '-', selector: (f.selector || '').slice(0, 50),
+    needsDebugger: f.needsDebugger ? 'Y' : '-',
+  })));
+  devGroupEnd();
+  devTimeEnd('SCRAPE', 'scrapeFormFields');
   return { fields, platform: platform?.name || null };
 }
 
 // Capture current form values (for learning)
 function captureFormValues(): Record<string, { label: string; value: string; type: string; options?: { value: string; text: string }[] }> {
+  devTimeStart('captureFormValues');
   const values: Record<string, { label: string; value: string; type: string; options?: { value: string; text: string }[] }> = {};
   const processedNames = new Set<string>();
 
@@ -1042,6 +1264,28 @@ function captureFormValues(): Record<string, { label: string; value: string; typ
     };
   });
 
+  // Capture generic-aria dropdown values ([aria-haspopup="listbox"] — e.g. Workday)
+  document.querySelectorAll('[aria-haspopup="listbox"]:not([role="combobox"]):not(select)').forEach((element, index) => {
+    const el = element as HTMLElement;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+    const label = getLabelForInput(el);
+    if (!label) return;
+    const fieldId = el.id || `generic_aria_${index}`;
+
+    // The selected value is typically the button's text content
+    const selectedText = el.textContent?.trim() || '';
+    // Skip if still showing placeholder
+    if (!selectedText || /^(select|choose|pick|search)\b/i.test(selectedText.toLowerCase())) return;
+
+    values[fieldId] = {
+      label,
+      value: selectedText,
+      type: 'combobox',
+    };
+  });
+
   // Capture input and textarea values
   const inputs = document.querySelectorAll('input, textarea');
 
@@ -1099,6 +1343,14 @@ function captureFormValues(): Record<string, { label: string; value: string; typ
     }
   });
 
+  const count = Object.keys(values).length;
+  devLog('CAPTURE', `Captured ${count} field values`);
+  devGroup('CAPTURE', `Captured values (${count})`);
+  devTable(Object.entries(values).map(([id, v]) => ({
+    fieldId: id, label: v.label.slice(0, 30), value: v.value.slice(0, 30), type: v.type,
+  })));
+  devGroupEnd();
+  devTimeEnd('CAPTURE', 'captureFormValues');
   return values;
 }
 
@@ -1112,7 +1364,7 @@ const pendingFillRequests = new Map<string, { resolve: (success: boolean) => voi
 // Listen for MAIN world ready signal
 window.addEventListener('kodkod-main-world-ready', () => {
   mainWorldReady = true;
-  console.log('KodKod: MAIN world bridge connected');
+  devLog('FILL_MAIN', 'MAIN world bridge connected');
 });
 
 // Listen for fill responses from MAIN world
@@ -1146,15 +1398,26 @@ function fillViaMainWorld(selector: string, value: string, fieldType: string): P
 
 // Fill a single form field
 async function fillFormField(fieldId: string, value: string, selectorHint?: string): Promise<boolean> {
+  devTimeStart(`fillField_${fieldId}`);
+  devLog('FILL_REGULAR', `Filling "${fieldId}" with "${value.slice(0, 30)}"${selectorHint ? ` hint=${selectorHint}` : ''}`);
+
   let element = document.getElementById(fieldId) as HTMLElement | null;
+  let lookupMethod = 'id';
   if (!element) {
     element = document.querySelector(`[name="${fieldId}"]`) as HTMLElement | null;
+    lookupMethod = 'name';
   }
   // Fallback: try the selector hint (for ARIA radiogroups, switches, etc.)
   if (!element && selectorHint) {
     element = document.querySelector(selectorHint) as HTMLElement | null;
+    lookupMethod = 'selector-hint';
   }
-  if (!element) return false;
+  if (!element) {
+    devWarn('FILL_REGULAR', `Element not found for "${fieldId}"`);
+    devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
+    return false;
+  }
+  devLog('FILL_REGULAR', `Element found via ${lookupMethod}: <${element.tagName.toLowerCase()}${element.id ? '#' + element.id : ''}>`);
 
   const tagName = element.tagName;
   const type = (element as HTMLInputElement).type?.toLowerCase() || '';
@@ -1178,7 +1441,12 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
     }
 
     const mainWorldSuccess = await fillViaMainWorld(selector, fillValue, fieldType);
-    if (mainWorldSuccess) return true;
+    if (mainWorldSuccess) {
+      devLog('FILL_REGULAR', `MAIN world succeeded for "${fieldId}"`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
+      return true;
+    }
+    devWarn('FILL_REGULAR', `MAIN world failed for "${fieldId}", falling back to DOM`);
     // Fall through to direct DOM manipulation if MAIN world failed
   }
 
@@ -1193,6 +1461,8 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
         if (selectEl.options[i].value === value) {
           selectEl.value = selectEl.options[i].value;
           selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          devLog('FILL_REGULAR', `SELECT exact-value match for "${fieldId}"`);
+          devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
           return true;
         }
       }
@@ -1200,6 +1470,8 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
         if (selectEl.options[i].text.trim().toLowerCase() === lowerValue) {
           selectEl.value = selectEl.options[i].value;
           selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          devLog('FILL_REGULAR', `SELECT exact-text match for "${fieldId}"`);
+          devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
           return true;
         }
       }
@@ -1208,9 +1480,13 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
         if (optText.includes(lowerValue) || lowerValue.includes(optText)) {
           selectEl.value = selectEl.options[i].value;
           selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          devLog('FILL_REGULAR', `SELECT contains match for "${fieldId}"`);
+          devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
           return true;
         }
       }
+      devWarn('FILL_REGULAR', `SELECT no option matched for "${fieldId}"`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
       return false;
     }
 
@@ -1220,6 +1496,8 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
       (element as HTMLInputElement).checked = shouldCheck;
       element.dispatchEvent(new Event('input', { bubbles: true }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
+      devLog('FILL_REGULAR', `Checkbox "${fieldId}" set to ${shouldCheck}`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
       return true;
     }
 
@@ -1233,9 +1511,13 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
             (radio as HTMLInputElement).value.toLowerCase() === lowerValue) {
           (radio as HTMLInputElement).checked = true;
           radio.dispatchEvent(new Event('change', { bubbles: true }));
+          devLog('FILL_REGULAR', `Radio "${fieldId}" matched label="${label}"`);
+          devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
           return true;
         }
       }
+      devWarn('FILL_REGULAR', `Radio "${fieldId}" no option matched for "${value}"`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
       return false;
     }
 
@@ -1250,9 +1532,13 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
             optText.includes(lowerValue) || lowerValue.includes(optText)) {
           opt.click();
           opt.dispatchEvent(new Event('change', { bubbles: true }));
+          devLog('FILL_REGULAR', `ARIA radio "${fieldId}" selected "${optText}"`);
+          devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
           return true;
         }
       }
+      devWarn('FILL_REGULAR', `ARIA radio "${fieldId}" no option matched for "${value}"`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
       return false;
     }
 
@@ -1264,6 +1550,8 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
         element.click();
         element.dispatchEvent(new Event('change', { bubbles: true }));
       }
+      devLog('FILL_REGULAR', `Switch "${fieldId}" set to ${shouldBeOn}`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
       return true;
     }
 
@@ -1272,40 +1560,72 @@ async function fillFormField(fieldId: string, value: string, selectorHint?: stri
       (element as HTMLInputElement).value = value;
       element.dispatchEvent(new Event('input', { bubbles: true }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
+      devLog('FILL_REGULAR', `Text "${fieldId}" filled (${value.length} chars)`);
+      devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
       return true;
     }
 
+    devWarn('FILL_REGULAR', `Unhandled element type for "${fieldId}": <${tagName}>`);
+    devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
     return false;
   } catch (err) {
-    console.error(`KodKod: Error filling ${fieldId}:`, err);
+    devError('FILL_REGULAR', `Error filling "${fieldId}":`, err);
+    devTimeEnd('FILL_REGULAR', `fillField_${fieldId}`);
     return false;
   }
 }
 
-// Fill all form fields
+// Fill all form fields (with single retry on failure)
 async function fillFormFields(values: Record<string, string>, fieldMeta?: FormField[]): Promise<{ filled: number; failed: number }> {
   let filled = 0;
   let failed = 0;
+  const fieldLogs: FieldFillLog[] = [];
 
-  // Build a lookup from field ID to selector for fallback
+  // Build lookups from field ID to selector and metadata
   const selectorMap = new Map<string, string>();
+  const metaMap = new Map<string, FormField>();
   if (fieldMeta) {
     for (const f of fieldMeta) {
       if (f.selector) selectorMap.set(f.id, f.selector);
+      metaMap.set(f.id, f);
     }
   }
 
   for (const [fieldId, value] of Object.entries(values)) {
     if (!value) continue;
 
-    if (await fillFormField(fieldId, value, selectorMap.get(fieldId))) {
-      filled++;
-    } else {
-      failed++;
+    const meta = metaMap.get(fieldId);
+    let success = await fillFormField(fieldId, value, selectorMap.get(fieldId));
+    let retried = false;
+
+    // Retry once after 500ms if first attempt failed
+    if (!success) {
+      devLog('FILL_REGULAR', `Retrying "${fieldId}" after 500ms...`);
+      await wait(500);
+      success = await fillFormField(fieldId, value, selectorMap.get(fieldId));
+      retried = true;
+      if (success) {
+        devLog('FILL_REGULAR', `Retry succeeded for "${fieldId}"`);
+      } else {
+        devWarn('FILL_REGULAR', `Retry also failed for "${fieldId}"`);
+      }
     }
+
+    fieldLogs.push({
+      fieldId,
+      label: meta?.label || fieldId,
+      type: meta?.type || 'unknown',
+      value,
+      success,
+      method: success ? 'filled' : 'failed',
+      retried,
+    });
+
+    if (success) filled++;
+    else failed++;
   }
 
-  console.log(`KodKod: Filled ${filled} fields, ${failed} failed`);
+  devFieldSummary('FILL_REGULAR', fieldLogs);
   return { filled, failed };
 }
 
@@ -1384,9 +1704,21 @@ chrome.runtime.onMessage.addListener(
     _sender: chrome.runtime.MessageSender,
     sendResponse: (response?: any) => void
   ) => {
+    devLog('DETECT', `Message received: ${request.action}`);
+
     if (request.action === 'scrape') {
+      // Skip scraping in non-content iframes (reCAPTCHA, ads, analytics)
+      if (window.self !== window.top) {
+        const frameHost = window.location.hostname;
+        const skipHosts = ['google.com', 'gstatic.com', 'recaptcha.net', 'doubleclick.net',
+          'googlesyndication.com', 'googletagmanager.com', 'facebook.com', 'facebook.net'];
+        if (skipHosts.some(h => frameHost.includes(h))) {
+          return false;
+        }
+      }
+
       const result = scrapeJobDescription();
-      console.log(`KodKod: Scraped from ${result.source}, ${result.content.length} chars, isTopFrame: ${window.self === window.top}`);
+      devLog('SCRAPE', `Scraped from ${result.source}, ${result.content.length} chars, isTopFrame: ${window.self === window.top}`);
       // If we're in an iframe with little content, don't respond (let main frame handle it)
       // But if we're the top frame, always respond
       if (window.self === window.top || result.content.length > 200) {
@@ -1441,9 +1773,15 @@ chrome.runtime.onMessage.addListener(
           let filled = 0;
           let failed = 0;
           const failedFields: string[] = [];
-          for (const field of request.fields!) {
+          for (let i = 0; i < request.fields!.length; i++) {
+            const field = request.fields![i];
             const value = request.values![field.id];
             if (!value) continue;
+            // Close any stale dropdown before opening the next
+            if (i > 0) {
+              document.body.click();
+              await wait(400);
+            }
             const success = await fillCustomDropdown(field, value);
             if (success) {
               filled++;

@@ -274,7 +274,25 @@ export default function KodKodApp() {
     if (!tab.id) return;
 
     try {
-      const response = await chrome.tabs.sendMessage(tab.id, { action: 'scrape' });
+      // Try main frame first (frameId: 0) to avoid reCAPTCHA/ad iframe responses
+      let response;
+      try {
+        response = await chrome.tabs.sendMessage(tab.id, { action: 'scrape' }, { frameId: 0 });
+      } catch {
+        // Main frame content script may not exist; try all frames
+        response = await chrome.tabs.sendMessage(tab.id, { action: 'scrape' });
+      }
+
+      // If main frame had too little content, try all frames
+      if (response?.content && response.content.trim().length < 100) {
+        try {
+          const allFrameResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrape' });
+          if (allFrameResponse?.content && allFrameResponse.content.trim().length > response.content.trim().length) {
+            response = allFrameResponse;
+          }
+        } catch { /* keep main frame response */ }
+      }
+
       if (response && response.content) {
         const content = response.content.trim();
         
@@ -303,7 +321,17 @@ export default function KodKodApp() {
           setError('It looks like the page hasn\'t fully loaded yet. Please refresh the page, wait for the job description to appear, then try again.');
           return;
         }
-        
+
+        // Detect reCAPTCHA/JS initialization content that slipped through
+        const looksLikeCode = lowerContent.includes('recaptcha') ||
+          lowerContent.includes('function(') ||
+          lowerContent.includes('\\x22') ||
+          (lowerContent.includes('init(') && lowerContent.includes('["'));
+        if (looksLikeCode && content.length < 1000) {
+          setError('Got page scripts instead of the job description. Please refresh the page, make sure you can see the job description on it, then try "Get from Page" again.');
+          return;
+        }
+
         setJobDescription(content);
         if (response.source && response.source !== 'generic') {
           setScrapeSource(response.source);
@@ -321,7 +349,7 @@ export default function KodKodApp() {
       devError('SCRAPE', 'Scrape failed:', e);
       const errorMsg = e?.message || String(e);
       if (errorMsg.includes('connect') || errorMsg.includes('Receiving end does not exist')) {
-        setError('Please refresh this page first, then click "Get from Page" again.');
+        setError('Extension lost connection to this page. Please refresh the page (Ctrl+R / ⌘R) and try again.');
       } else {
         setError('Could not access page content. Please refresh the page and try again.');
       }
