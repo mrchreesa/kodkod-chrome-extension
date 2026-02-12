@@ -3,6 +3,17 @@
  * Runs in the page's JS context so it can bypass React's property overrides.
  */
 
+// Inline dev logger (cannot import shared debug.ts — runs in MAIN world, separate bundle)
+const _isDev = import.meta.env.DEV;
+function _devLog(msg: string, data?: unknown) {
+  if (!_isDev) return;
+  console.log(`%c[KodKod:FILL_MAIN]%c ${msg}`, 'color:#8b5cf6;font-weight:bold', 'color:inherit', ...(data !== undefined ? [data] : []));
+}
+function _devWarn(msg: string, data?: unknown) {
+  if (!_isDev) return;
+  console.warn(`%c[KodKod:FILL_MAIN]%c ${msg}`, 'color:#8b5cf6;font-weight:bold', 'color:inherit', ...(data !== undefined ? [data] : []));
+}
+
 interface FillRequest {
   id: string;
   selector: string;
@@ -39,7 +50,11 @@ const nativeCheckedSetter = Object.getOwnPropertyDescriptor(
 
 function fillElement(selector: string, value: string, fieldType: string): boolean {
   const el = document.querySelector(selector) as HTMLElement | null;
-  if (!el) return false;
+  if (!el) {
+    _devWarn(`Element not found: ${selector}`);
+    return false;
+  }
+  _devLog(`Filling ${fieldType} via ${selector} with "${value.slice(0, 30)}"`);
 
   try {
     // Focus the element first
@@ -83,9 +98,10 @@ function fillElement(selector: string, value: string, fieldType: string): boolea
 
     // Blur after setting
     el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    _devLog(`Successfully filled ${fieldType} via ${selector}`);
     return true;
   } catch (err) {
-    console.error('KodKod MAIN: Error filling element:', err);
+    _devWarn(`Error filling element ${selector}:`, err);
     return false;
   }
 }
@@ -101,4 +117,4 @@ window.addEventListener('kodkod-fill-request', ((event: CustomEvent<FillRequest>
 
 // Signal that the MAIN world bridge is ready
 window.dispatchEvent(new CustomEvent('kodkod-main-world-ready'));
-console.log('KodKod: MAIN world bridge established');
+_devLog('MAIN world bridge established');

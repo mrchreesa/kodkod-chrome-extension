@@ -1,10 +1,22 @@
 /// <reference types="chrome" />
-console.log('KodKod Background Service Worker running')
+
+// Inline dev logger (service worker — separate bundle, cannot import shared debug.ts)
+const isDev = import.meta.env.DEV;
+function bgLog(msg: string, data?: unknown) {
+  if (!isDev) return;
+  console.log(`%c[KodKod:FILL_DEBUGGER]%c ${msg}`, 'color:#f97316;font-weight:bold', 'color:inherit', ...(data !== undefined ? [data] : []));
+}
+function bgWarn(msg: string, data?: unknown) {
+  if (!isDev) return;
+  console.warn(`%c[KodKod:FILL_DEBUGGER]%c ${msg}`, 'color:#f97316;font-weight:bold', 'color:inherit', ...(data !== undefined ? [data] : []));
+}
+
+bgLog('Background service worker running');
 
 // Open side panel on action click
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
-  .catch((error: unknown) => console.error(error));
+  .catch((error: unknown) => bgWarn('Failed to set panel behavior:', error));
 
 // ============================================
 // CHROME DEBUGGER API - DROPDOWN AUTOMATION
@@ -20,18 +32,18 @@ const attachedTabs = new Set<number>();
 // Attach debugger to tab
 async function attachDebugger(tabId: number): Promise<boolean> {
   if (attachedTabs.has(tabId)) {
-    console.log(`KodKod: Debugger already attached to tab ${tabId}`);
+    bgLog(`Debugger already attached to tab ${tabId}`);
     return true;
   }
 
   return new Promise((resolve) => {
     chrome.debugger.attach({ tabId }, '1.3', () => {
       if (chrome.runtime.lastError) {
-        console.error('KodKod: Failed to attach debugger:', chrome.runtime.lastError.message);
+        bgWarn('Failed to attach debugger:', chrome.runtime.lastError.message);
         resolve(false);
       } else {
         attachedTabs.add(tabId);
-        console.log(`KodKod: Debugger attached to tab ${tabId}`);
+        bgLog(`Debugger attached to tab ${tabId}`);
         resolve(true);
       }
     });
@@ -46,9 +58,9 @@ async function detachDebugger(tabId: number): Promise<void> {
     chrome.debugger.detach({ tabId }, () => {
       attachedTabs.delete(tabId);
       if (chrome.runtime.lastError) {
-        console.error('KodKod: Failed to detach debugger:', chrome.runtime.lastError.message);
+        bgWarn('Failed to detach debugger:', chrome.runtime.lastError.message);
       } else {
-        console.log(`KodKod: Debugger detached from tab ${tabId}`);
+        bgLog(`Debugger detached from tab ${tabId}`);
       }
       resolve();
     });
@@ -84,9 +96,15 @@ async function getElementPosition(
     });
 
     if (!nodeResult.nodeId) {
-      console.error(`KodKod: Element not found: ${selector}`);
+      bgWarn(`Element not found: ${selector}`);
       return null;
     }
+
+    // Scroll element into view (ensures correct viewport-relative coords)
+    try {
+      await sendCommand(tabId, 'DOM.scrollIntoViewIfNeeded', { nodeId: nodeResult.nodeId });
+      await new Promise((r) => setTimeout(r, 100));
+    } catch { /* older Chrome versions may not support this */ }
 
     // Get box model
     const boxModel = await sendCommand<{
@@ -97,7 +115,7 @@ async function getElementPosition(
     }>(tabId, 'DOM.getBoxModel', { nodeId: nodeResult.nodeId });
 
     if (!boxModel.model) {
-      console.error(`KodKod: Could not get box model for: ${selector}`);
+      bgWarn(`Could not get box model for: ${selector}`);
       return null;
     }
 
@@ -110,7 +128,7 @@ async function getElementPosition(
 
     return { x, y, width, height };
   } catch (err) {
-    console.error('KodKod: Error getting element position:', err);
+    bgWarn('Error getting element position:', err);
     return null;
   }
 }
@@ -145,7 +163,7 @@ async function clickAtPosition(
 
     return true;
   } catch (err) {
-    console.error('KodKod: Error clicking:', err);
+    bgWarn('Error clicking:', err);
     return false;
   }
 }
@@ -167,7 +185,7 @@ async function typeText(tabId: number, text: string): Promise<boolean> {
     }
     return true;
   } catch (err) {
-    console.error('KodKod: Error typing:', err);
+    bgWarn('Error typing:', err);
     return false;
   }
 }
@@ -206,7 +224,7 @@ async function pressKey(tabId: number, key: string, keyCode?: number): Promise<b
 
     return true;
   } catch (err) {
-    console.error(`KodKod: Error pressing ${key}:`, err);
+    bgWarn(`Error pressing ${key}:`, err);
     return false;
   }
 }
@@ -224,21 +242,20 @@ async function clickElement(tabId: number, selector: string): Promise<boolean> {
 }
 
 // Select dropdown value using CDP
-// This handles ARIA comboboxes (Workday, SuccessFactors style)
+// Strategy: click to open → find matching [role="option"] via DOM → click it.
+// Fallback: type text + Enter (for searchable comboboxes).
 async function selectDropdownValue(
   tabId: number,
   dropdownSelector: string,
   optionText: string
 ): Promise<{ success: boolean; method: string; error?: string }> {
   try {
-    // Attach debugger if needed
     const attached = await attachDebugger(tabId);
     if (!attached) {
       return { success: false, method: 'none', error: 'Failed to attach debugger' };
     }
 
-    // Strategy 1: Click dropdown to open, then use keyboard to find option
-    console.log(`KodKod: Trying to select "${optionText}" from ${dropdownSelector}`);
+    bgLog(`Selecting "${optionText}" from ${dropdownSelector}`);
 
     // Click the dropdown to open it
     const clicked = await clickElement(tabId, dropdownSelector);
@@ -246,20 +263,85 @@ async function selectDropdownValue(
       return { success: false, method: 'click', error: 'Failed to click dropdown' };
     }
 
-    // Wait for dropdown to open
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for listbox to render
+    await new Promise((r) => setTimeout(r, 400));
 
-    // Type the option text to filter/search (works for searchable comboboxes)
+    // --- Strategy 1: Find and click the matching [role="option"] element ---
+    try {
+      const doc = await sendCommand<{ root: { nodeId: number } }>(tabId, 'DOM.getDocument');
+      const optionsResult = await sendCommand<{ nodeIds: number[] }>(tabId, 'DOM.querySelectorAll', {
+        nodeId: doc.root.nodeId,
+        selector: '[role="option"]',
+      });
+
+      if (optionsResult.nodeIds && optionsResult.nodeIds.length > 0) {
+        bgLog(`Found ${optionsResult.nodeIds.length} [role="option"] elements`);
+        const targetLower = optionText.toLowerCase().trim();
+        let matchedNodeId: number | null = null;
+        let matchedText = '';
+
+        for (const nodeId of optionsResult.nodeIds) {
+          try {
+            const html = await sendCommand<{ outerHTML: string }>(tabId, 'DOM.getOuterHTML', { nodeId });
+            const text = html.outerHTML.replace(/<[^>]*>/g, '').trim();
+            const textLower = text.toLowerCase();
+
+            if (textLower === targetLower) {
+              matchedNodeId = nodeId;
+              matchedText = text;
+              break;
+            }
+            // Partial/contains match as fallback
+            if (!matchedNodeId && (textLower.includes(targetLower) || targetLower.includes(textLower))) {
+              matchedNodeId = nodeId;
+              matchedText = text;
+            }
+          } catch { /* skip unreadable nodes */ }
+        }
+
+        if (matchedNodeId) {
+          // Scroll the option into view first
+          try {
+            await sendCommand(tabId, 'DOM.scrollIntoViewIfNeeded', { nodeId: matchedNodeId });
+            await new Promise((r) => setTimeout(r, 100));
+          } catch { /* ignore */ }
+
+          const boxModel = await sendCommand<{ model: { content: number[] } }>(tabId, 'DOM.getBoxModel', { nodeId: matchedNodeId });
+          if (boxModel.model) {
+            const c = boxModel.model.content;
+            const centerX = c[0] + (c[2] - c[0]) / 2;
+            const centerY = c[1] + (c[5] - c[1]) / 2;
+            bgLog(`Option "${matchedText}" at (${centerX.toFixed(0)}, ${centerY.toFixed(0)})`);
+
+            const clickedOption = await clickAtPosition(tabId, centerX, centerY);
+            if (clickedOption) {
+              bgLog(`Clicked option "${matchedText}" for "${optionText}"`);
+              await new Promise((r) => setTimeout(r, 300));
+              return { success: true, method: 'option-click' };
+            } else {
+              bgWarn(`Click at (${centerX.toFixed(0)}, ${centerY.toFixed(0)}) failed for "${matchedText}"`);
+            }
+          } else {
+            bgWarn(`No box model for matched option node`);
+          }
+        } else {
+          bgWarn(`No [role="option"] matched "${optionText}"`);
+        }
+      }
+    } catch (domErr) {
+      bgWarn('DOM option-click strategy failed, trying keyboard fallback:', domErr);
+    }
+
+    // --- Strategy 2 (fallback): Type text + Enter (searchable comboboxes) ---
+    bgLog(`Falling back to keyboard-type for "${optionText}"`);
     await typeText(tabId, optionText);
     await new Promise((r) => setTimeout(r, 200));
-
-    // Press Enter to select
     await pressKey(tabId, 'Enter');
     await new Promise((r) => setTimeout(r, 100));
 
     return { success: true, method: 'keyboard-type' };
   } catch (err) {
-    console.error('KodKod: Error selecting dropdown:', err);
+    bgWarn('Error selecting dropdown:', err);
     return { success: false, method: 'error', error: String(err) };
   }
 }
@@ -356,13 +438,21 @@ async function fillFormWithDebugger(
     };
   }
 
-  for (const field of fields) {
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
     let success = false;
     let method = 'unknown';
 
+    bgLog(`[${i + 1}/${fields.length}] Filling ${field.type} "${field.value.slice(0, 30)}" → ${field.selector}`);
+
     try {
+      // Close any stale popups/listboxes before starting the next field
+      if (i > 0) {
+        await pressKey(tabId, 'Escape');
+        await new Promise((r) => setTimeout(r, 300));
+      }
+
       if (field.type === 'combobox' || field.type === 'select' || field.type === 'dropdown') {
-        // Handle dropdowns with keyboard navigation
         const result = await selectDropdownValue(tabId, field.selector, field.value);
         success = result.success;
         method = result.method;
@@ -376,24 +466,26 @@ async function fillFormWithDebugger(
         await new Promise((r) => setTimeout(r, 100));
 
         // Clear existing text
-        await pressKey(tabId, 'a', 65); // Ctrl+A simulation doesn't work well, just overwrite
-        
+        await pressKey(tabId, 'a', 65);
+
         success = await typeText(tabId, field.value);
         method = 'type';
       }
     } catch (err) {
-      console.error(`KodKod: Error filling ${field.selector}:`, err);
+      bgWarn(`Error filling ${field.selector}:`, err);
       method = 'error';
     }
 
+    bgLog(`[${i + 1}/${fields.length}] ${success ? 'OK' : 'FAIL'} (method=${method})`);
     results.push({ selector: field.selector, success, method });
     if (success) filled++;
     else failed++;
 
-    // Delay between fields
-    await new Promise((r) => setTimeout(r, 150));
+    // Longer delay between fields — Workday needs time for React re-renders
+    await new Promise((r) => setTimeout(r, 600));
   }
 
+  bgLog(`Debugger fill complete: ${filled} filled, ${failed} failed`);
   return { filled, failed, results };
 }
 
@@ -401,7 +493,7 @@ async function fillFormWithDebugger(
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (attachedTabs.has(tabId)) {
     attachedTabs.delete(tabId);
-    console.log(`KodKod: Tab ${tabId} closed, removed from attached tabs`);
+    bgLog(`Tab ${tabId} closed, removed from attached tabs`);
   }
 });
 
@@ -409,7 +501,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId) {
     attachedTabs.delete(source.tabId);
-    console.log(`KodKod: Debugger detached from tab ${source.tabId}, reason: ${reason}`);
+    bgLog(`Debugger detached from tab ${source.tabId}, reason: ${reason}`);
   }
 });
 
@@ -474,4 +566,4 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 });
 
-console.log('KodKod: Debugger automation ready');
+bgLog('Debugger automation ready');
